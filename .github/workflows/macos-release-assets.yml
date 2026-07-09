@@ -19,10 +19,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             asset_suffix: macos-x86_64
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             asset_suffix: macos-aarch64
 
