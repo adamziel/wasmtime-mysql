@@ -1,0 +1,1670 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1dc2bd4..44e2d30 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -187,6 +187,9 @@ ENDIF()
+ # Same with SUSE linux 15, look for gcc 12 there.
+ # We need to look for gcc before calling PROJECT below.
+ OPTION(FORCE_UNSUPPORTED_COMPILER "Disable compiler version checks" OFF)
++OPTION(MYSQL_WASI_PORT_PROBE
++  "Diagnostic-only WASI configure probe; bypasses selected configure-time blockers without making the target ABI valid or supported."
++  OFF)
+ MARK_AS_ADVANCED(WITHOUT_SERVER FORCE_UNSUPPORTED_COMPILER)
+ 
+ # Use 'uname -r' and 'rpm -qf /' to figure out host system.
+@@ -695,7 +698,15 @@ MESSAGE(STATUS "SIZEOF_VOIDP ${SIZEOF_VOIDP}")
+ # even if we have configured for 64bit build....
+ SET(CMAKE_SIZEOF_VOID_P ${SIZEOF_VOIDP})
+ IF(NOT SIZEOF_VOIDP EQUAL 8)
+-  MESSAGE(FATAL_ERROR "MySQL supports only 64-bit platforms.")
++  IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI")
++    MESSAGE(WARNING
++      "MYSQL_WASI_PORT_PROBE bypassing MySQL's 64-bit platform check. "
++      "The active WASI SDK target is still wasm32; this is only a diagnostic "
++      "probe to expose later porting blockers. Keeping the actual pointer "
++      "size for generated ABI constants.")
++  ELSE()
++    MESSAGE(FATAL_ERROR "MySQL supports only 64-bit platforms.")
++  ENDIF()
+ ENDIF()
+ 
+ INCLUDE(compile_flags)
+diff --git a/cmake/protobuf.cmake b/cmake/protobuf.cmake
+index cc089b3..e747180 100644
+--- a/cmake/protobuf.cmake
++++ b/cmake/protobuf.cmake
+@@ -108,7 +108,12 @@ MACRO(MYSQL_USE_BUNDLED_PROTOBUF)
+   SET(PROTOBUF_FOUND 1 CACHE INTERNAL "")
+   SET(PROTOBUF_INCLUDE_DIR ${BUNDLED_PROTO_SRCDIR} CACHE INTERNAL "")
+   SET(PROTOBUF_INCLUDE_DIRS ${BUNDLED_PROTO_SRCDIR} CACHE INTERNAL "")
+-  SET(PROTOBUF_PROTOC_EXECUTABLE protoc CACHE INTERNAL "")
++  IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI" AND
++      WITH_PROTOC)
++    SET(PROTOBUF_PROTOC_EXECUTABLE ${WITH_PROTOC} CACHE INTERNAL "")
++  ELSE()
++    SET(PROTOBUF_PROTOC_EXECUTABLE protoc CACHE INTERNAL "")
++  ENDIF()
+   INCLUDE_DIRECTORIES(BEFORE SYSTEM ${BUNDLED_PROTO_SRCDIR})
+ ENDMACRO(MYSQL_USE_BUNDLED_PROTOBUF)
+ 
+diff --git a/cmake/readline.cmake b/cmake/readline.cmake
+index 86f7062..a05ffef 100644
+--- a/cmake/readline.cmake
++++ b/cmake/readline.cmake
+@@ -214,7 +214,14 @@ IF (NOT WITH_EDITLINE AND NOT WIN32)
+ ENDIF()
+ 
+ MACRO (MYSQL_CHECK_EDITLINE)
+-  IF (NOT WIN32)
++  IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI")
++    MESSAGE(WARNING
++      "MYSQL_WASI_PORT_PROBE skipping editline/curses setup. "
++      "The mysqld port probe does not build interactive clients, and WASI SDK "
++      "does not provide curses.")
++    SET(EDITLINE_LIBRARY "")
++    SET(EDITLINE_FOUND 0)
++  ELSEIF (NOT WIN32)
+     MYSQL_CHECK_MULTIBYTE()
+ 
+     IF(WITH_EDITLINE STREQUAL "bundled") 
+@@ -227,5 +234,5 @@ MACRO (MYSQL_CHECK_EDITLINE)
+     ELSE()
+       MESSAGE(FATAL_ERROR "WITH_EDITLINE must be bundled or system")
+     ENDIF()
+-  ENDIF(NOT WIN32)
++  ENDIF()
+ ENDMACRO()
+diff --git a/configure.cmake b/configure.cmake
+index fe8288e..376eb74 100644
+--- a/configure.cmake
++++ b/configure.cmake
+@@ -314,6 +314,21 @@ CHECK_FUNCTION_EXISTS (timer_create HAVE_TIMER_CREATE)
+ CHECK_FUNCTION_EXISTS (timer_settime HAVE_TIMER_SETTIME)
+ CHECK_FUNCTION_EXISTS (kqueue HAVE_KQUEUE)
+ 
++IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI")
++  MESSAGE(WARNING
++    "MYSQL_WASI_PORT_PROBE disabling false-positive epoll/kqueue checks. "
++    "WASI SDK exposes neither Linux epoll nor BSD kqueue headers/APIs.")
++  SET(HAVE_EPOLL 0 CACHE INTERNAL "WASI has no epoll" FORCE)
++  SET(HAVE_KQUEUE 0 CACHE INTERNAL "WASI has no kqueue" FORCE)
++  SET(HAVE_ALIGNED_MALLOC 0 CACHE INTERNAL "WASI has no _aligned_malloc" FORCE)
++  SET(HAVE_FEDISABLEEXCEPT 0 CACHE INTERNAL "WASI has no fedisableexcept" FORCE)
++  SET(HAVE_INITGROUPS 0 CACHE INTERNAL "WASI has no initgroups" FORCE)
++  SET(HAVE_POSIX_MEMALIGN 1 CACHE INTERNAL "WASI has posix_memalign" FORCE)
++  SET(HAVE_MEMALIGN 0 CACHE INTERNAL "WASI hides legacy memalign" FORCE)
++  SET(HAVE_STRLCAT 1 CACHE INTERNAL "WASI has strlcat" FORCE)
++  SET(HAVE_STRLCPY 1 CACHE INTERNAL "WASI has strlcpy" FORCE)
++ENDIF()
++
+ # Check whether the setns() API function supported by a target platform
+ CHECK_C_SOURCE_RUNS("
+ #ifndef _GNU_SOURCE
+diff --git a/extra/abseil/abseil-cpp-20230802.1/absl/base/internal/low_level_alloc.cc b/extra/abseil/abseil-cpp-20230802.1/absl/base/internal/low_level_alloc.cc
+index 6d2cfea..090ee21 100644
+--- a/extra/abseil/abseil-cpp-20230802.1/absl/base/internal/low_level_alloc.cc
++++ b/extra/abseil/abseil-cpp-20230802.1/absl/base/internal/low_level_alloc.cc
+@@ -35,7 +35,9 @@
+ 
+ #ifndef _WIN32
+ #include <pthread.h>
++#ifndef ABSL_LOW_LEVEL_ALLOC_ASYNC_SIGNAL_SAFE_MISSING
+ #include <signal.h>
++#endif
+ #include <sys/mman.h>
+ #include <unistd.h>
+ #else
+diff --git a/extra/abseil/abseil-cpp-20230802.1/absl/base/internal/thread_identity.cc b/extra/abseil/abseil-cpp-20230802.1/absl/base/internal/thread_identity.cc
+index 252443e..3ea5d60 100644
+--- a/extra/abseil/abseil-cpp-20230802.1/absl/base/internal/thread_identity.cc
++++ b/extra/abseil/abseil-cpp-20230802.1/absl/base/internal/thread_identity.cc
+@@ -16,8 +16,10 @@
+ 
+ #if !defined(_WIN32) || defined(__MINGW32__)
+ #include <pthread.h>
++#if !defined(__wasi__)
+ #include <signal.h>
+ #endif
++#endif
+ 
+ #include <atomic>
+ #include <cassert>
+@@ -80,10 +82,11 @@ void SetCurrentThreadIdentity(ThreadIdentity* identity,
+   absl::call_once(init_thread_identity_key_once, AllocateThreadIdentityKey,
+                   reclaimer);
+ 
+-#if defined(__EMSCRIPTEN__) || defined(__MINGW32__) || defined(__hexagon__)
+-  // Emscripten and MinGW pthread implementations does not support signals.
++#if defined(__EMSCRIPTEN__) || defined(__MINGW32__) || defined(__hexagon__) || \
++    defined(__wasi__)
++  // These pthread implementations do not support signals.
+   // See https://kripken.github.io/emscripten-site/docs/porting/pthreads.html
+-  // for more information.
++  // for Emscripten background.
+   pthread_setspecific(thread_identity_pthread_key,
+                       reinterpret_cast<void*>(identity));
+ #else
+diff --git a/extra/abseil/abseil-cpp-20230802.1/absl/debugging/failure_signal_handler.cc b/extra/abseil/abseil-cpp-20230802.1/absl/debugging/failure_signal_handler.cc
+index 992c89c..4d8e1d0 100644
+--- a/extra/abseil/abseil-cpp-20230802.1/absl/debugging/failure_signal_handler.cc
++++ b/extra/abseil/abseil-cpp-20230802.1/absl/debugging/failure_signal_handler.cc
+@@ -18,6 +18,27 @@
+ 
+ #include "absl/base/config.h"
+ 
++#ifdef __wasi__
++
++namespace absl {
++ABSL_NAMESPACE_BEGIN
++
++void InstallFailureSignalHandler(const FailureSignalHandlerOptions& options) {
++  (void)options;
++}
++
++namespace debugging_internal {
++const char* FailureSignalToString(int signo) {
++  (void)signo;
++  return "";
++}
++}  // namespace debugging_internal
++
++ABSL_NAMESPACE_END
++}  // namespace absl
++
++#else  // !__wasi__
++
+ #ifdef _WIN32
+ #include <windows.h>
+ #else
+@@ -403,3 +424,5 @@ void InstallFailureSignalHandler(const FailureSignalHandlerOptions& options) {
+ 
+ ABSL_NAMESPACE_END
+ }  // namespace absl
++
++#endif  // __wasi__
+diff --git a/extra/abseil/abseil-cpp-20230802.1/absl/debugging/internal/examine_stack.cc b/extra/abseil/abseil-cpp-20230802.1/absl/debugging/internal/examine_stack.cc
+index 3dd6ba1..1fecb4f 100644
+--- a/extra/abseil/abseil-cpp-20230802.1/absl/debugging/internal/examine_stack.cc
++++ b/extra/abseil/abseil-cpp-20230802.1/absl/debugging/internal/examine_stack.cc
+@@ -33,7 +33,9 @@
+ #include <sys/ucontext.h>
+ #endif
+ 
++#if !defined(__wasi__)
+ #include <csignal>
++#endif
+ #include <cstdio>
+ 
+ #include "absl/base/attributes.h"
+diff --git a/extra/icu/icu-release-77-1/source/i18n/decContext.h b/extra/icu/icu-release-77-1/source/i18n/decContext.h
+index 91c6739..afcde7f 100644
+--- a/extra/icu/icu-release-77-1/source/i18n/decContext.h
++++ b/extra/icu/icu-release-77-1/source/i18n/decContext.h
+@@ -61,7 +61,9 @@
+ /* #include <stdint.h>   */         /* C99 standard integers           */
+   #endif
+   #include <stdio.h>               /* for printf, etc.                */
+-  #include <signal.h>              /* for traps                       */
++  #if !defined(__wasi__)
++    #include <signal.h>            /* for traps                       */
++  #endif
+ 
+   /* Extended flags setting -- set this to 0 to use only IEEE flags   */
+   #if !defined(DECEXTFLAG)
+diff --git a/include/my_io.h b/include/my_io.h
+index 6885510..48a9fb4 100644
+--- a/include/my_io.h
++++ b/include/my_io.h
+@@ -174,8 +174,21 @@ constexpr const unsigned int DISK_BUFFER_SIZE{IO_SIZE * 16};
+ #define SOCKET_ENFILE ENFILE
+ #define SOCKET_EMFILE EMFILE
+ #else /* Unix */
++#if defined(__wasi__)
++#ifdef __cplusplus
++extern "C" {
++#endif
++int waasmtime_mysql_close(int fd);
++#ifdef __cplusplus
++}
++#endif
++#endif
+ #define socket_errno errno
++#if defined(__wasi__)
++#define closesocket(A) waasmtime_mysql_close(A)
++#else
+ #define closesocket(A) close(A)
++#endif
+ #define SOCKET_EINTR EINTR
+ #define SOCKET_EAGAIN EAGAIN
+ #define SOCKET_EWOULDBLOCK EWOULDBLOCK
+diff --git a/include/mysql/psi/mysql_socket.h b/include/mysql/psi/mysql_socket.h
+index 7833239..2f1cb07 100644
+--- a/include/mysql/psi/mysql_socket.h
++++ b/include/mysql/psi/mysql_socket.h
+@@ -55,6 +55,25 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+ #define SOCKBUF_T void
+ #endif
+ 
++#if defined(__wasi__)
++#include "mysql_wasi_socket_shim.h"
++#define socket(...) waasmtime_mysql_socket(__VA_ARGS__)
++#define bind(...) waasmtime_mysql_bind(__VA_ARGS__)
++#define listen(...) waasmtime_mysql_listen(__VA_ARGS__)
++#define accept(...) waasmtime_mysql_accept(__VA_ARGS__)
++#define connect(...) waasmtime_mysql_connect(__VA_ARGS__)
++#define getsockname(...) waasmtime_mysql_getsockname(__VA_ARGS__)
++#define getpeername(...) waasmtime_mysql_getpeername(__VA_ARGS__)
++#define setsockopt(...) waasmtime_mysql_setsockopt(__VA_ARGS__)
++#define getsockopt(...) waasmtime_mysql_getsockopt(__VA_ARGS__)
++#define send(...) waasmtime_mysql_send(__VA_ARGS__)
++#define recv(...) waasmtime_mysql_recv(__VA_ARGS__)
++#define sendto(...) waasmtime_mysql_sendto(__VA_ARGS__)
++#define recvfrom(...) waasmtime_mysql_recvfrom(__VA_ARGS__)
++#define shutdown(...) waasmtime_mysql_shutdown(__VA_ARGS__)
++#define fcntl(...) waasmtime_mysql_fcntl(__VA_ARGS__)
++#endif
++
+ #include "my_macros.h"
+ #include "mysql/components/services/bits/mysql_socket_bits.h"
+ 
+@@ -1231,6 +1250,24 @@ static inline int inline_mysql_socket_shutdown(
+   return result;
+ }
+ 
++#if defined(__wasi__)
++#undef socket
++#undef bind
++#undef listen
++#undef accept
++#undef connect
++#undef getsockname
++#undef getpeername
++#undef setsockopt
++#undef getsockopt
++#undef send
++#undef recv
++#undef sendto
++#undef recvfrom
++#undef shutdown
++#undef fcntl
++#endif
++
+ /** @} (end of group psi_api_socket) */
+ 
+ #endif
+diff --git a/include/violite.h b/include/violite.h
+index b79f87a..403c309 100644
+--- a/include/violite.h
++++ b/include/violite.h
+@@ -52,7 +52,7 @@ struct Vio;
+ 
+ /* Simple vio interface in C;  The functions are implemented in violite.c */
+ 
+-#if !defined(_WIN32) && !defined(HAVE_KQUEUE)
++#if !defined(_WIN32) && !defined(HAVE_KQUEUE) && !defined(__wasi__)
+ #define USE_PPOLL_IN_VIO
+ #endif
+ 
+diff --git a/libmysql/CMakeLists.txt b/libmysql/CMakeLists.txt
+index 9dfdcc1..8711c73 100644
+--- a/libmysql/CMakeLists.txt
++++ b/libmysql/CMakeLists.txt
+@@ -283,7 +283,14 @@ ELSE()
+ ENDIF()
+ 
+ IF(HAVE_DNS_SRV EQUAL 0)
+-  MESSAGE(FATAL_ERROR "Can't find neither Win32 nor Unix DNS SRV APIs")
++  IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI")
++    MESSAGE(WARNING
++      "MYSQL_WASI_PORT_PROBE disabling DNS SRV lookup support. "
++      "WASI SDK does not provide Win32 DNS APIs or Unix libresolv.")
++  ELSE()
++    MESSAGE(FATAL_ERROR
++      "Can't find neither Win32 nor Unix DNS SRV APIs")
++  ENDIF()
+ ENDIF()
+ #
+ # On Windows platform client library includes the client-side
+diff --git a/libmysql/dns_srv.cc b/libmysql/dns_srv.cc
+index 97047be..0cf8716 100644
+--- a/libmysql/dns_srv.cc
++++ b/libmysql/dns_srv.cc
+@@ -133,16 +133,15 @@ static bool get_dns_srv(Dns_srv_data &data, const char *dnsname, int &error) {
+   return status != ERROR_SUCCESS;
+ }
+ #else
+-
+-#error "No DNS SRV Support detected for your OS. Consider adjusting Cmake."
+-
+-#if 0
+-// dummy function returning an error in case it's not supported by the OS
+-
++#ifdef __wasi__
+ static bool get_dns_srv(Dns_srv_data &data, const char *dnsname, int &error) {
+-  error = -1;  // set a special error code for not supported
++  data.clear();
++  (void)dnsname;
++  error = -1;
+   return true;
+ }
++#else
++#error "No DNS SRV Support detected for your OS. Consider adjusting Cmake."
+ #endif
+ #endif
+ 
+diff --git a/mysys/mf_tempfile.cc b/mysys/mf_tempfile.cc
+index 91d51df..53efe25 100644
+--- a/mysys/mf_tempfile.cc
++++ b/mysys/mf_tempfile.cc
+@@ -55,6 +55,10 @@
+ #include "mysys_err.h"
+ #include "nulls.h"
+ 
++#ifdef __wasi__
++#include "mysql_wasi_libc_shim.h"
++#endif
++
+ #ifdef WIN32
+ #include <fcntl.h>  // O_EXCL
+ #include <inttypes.h>
+diff --git a/mysys/posix_timers.cc b/mysys/posix_timers.cc
+index 42af3e1..3bbd0af 100644
+--- a/mysys/posix_timers.cc
++++ b/mysys/posix_timers.cc
+@@ -31,6 +31,34 @@
+ */
+ 
+ #include <errno.h>
++#ifdef __wasi__
++#include "my_timer.h" /* my_timer_t */
++
++int my_timer_initialize() { return 0; }
++
++void my_timer_deinitialize() {}
++
++int my_timer_create(my_timer_t *timer) {
++  timer->id = nullptr;
++  return 0;
++}
++
++int my_timer_set(my_timer_t *timer, unsigned long time) {
++  (void)timer;
++  (void)time;
++  return 0;
++}
++
++int my_timer_cancel(my_timer_t *timer, int *state) {
++  (void)timer;
++  if (state != nullptr) *state = 1;
++  return 0;
++}
++
++void my_timer_delete(my_timer_t *timer) { (void)timer; }
++
++#else /* !__wasi__ */
++
+ #include <signal.h>
+ #include <string.h> /* memset */
+ #include <sys/time.h>
+@@ -126,3 +154,5 @@ int my_timer_cancel(my_timer_t *timer, int *state) {
+ */
+ 
+ void my_timer_delete(my_timer_t *timer) { timer_delete(timer->id); }
++
++#endif /* __wasi__ */
+diff --git a/mysys/stacktrace.cc b/mysys/stacktrace.cc
+index 76b6c38..9f66853 100644
+--- a/mysys/stacktrace.cc
++++ b/mysys/stacktrace.cc
+@@ -58,6 +58,32 @@
+ #include "template_utils.h"
+ 
+ #ifndef _WIN32
++#ifdef __wasi__
++
++void my_init_stacktrace() {}
++
++#ifdef HAVE_STACKTRACE
++void my_safe_puts_stderr(const char *val, size_t max_len) {
++  if (val == nullptr) return;
++  const size_t len = strnlen(val, max_len);
++  my_write_stderr(val, len);
++  my_write_stderr("\n", 1);
++}
++
++void my_print_stacktrace(const uchar *stack_bottom, ulong thread_stack) {
++  (void)stack_bottom;
++  (void)thread_stack;
++  my_safe_printf_stderr("%s", "WASI stack traces are not available.\n");
++}
++#endif
++
++void my_write_core(int sig) {
++  (void)sig;
++  abort();
++}
++
++#else /* !__wasi__ */
++
+ #include <signal.h>
+ 
+ #include "my_thread.h"
+@@ -348,6 +374,8 @@ void my_write_core(int sig) {
+ #endif
+ }
+ 
++#endif /* __wasi__ */
++
+ #else /* _WIN32*/
+ 
+ #include <dbghelp.h>
+diff --git a/plugin/x/CMakeLists.txt b/plugin/x/CMakeLists.txt
+index b640da9..f1b1ed9 100644
+--- a/plugin/x/CMakeLists.txt
++++ b/plugin/x/CMakeLists.txt
+@@ -24,6 +24,15 @@
+ 
+ OPTION(WITH_MYSQLX "Build MySQL X plugin" ON)
+ 
++IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI" AND
++    NOT WITH_MYSQLX)
++  MESSAGE(WARNING
++    "MYSQL_WASI_PORT_PROBE skipping the MySQL X plugin subtree. "
++    "The diagnostic mysqld target does not need X Plugin protocol code "
++    "generation or target-side protoc plugins.")
++  RETURN()
++ENDIF()
++
+ SET(MYSQLX_PROJECT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+ SET(MYSQLX_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
+ SET(MYSQLX_PLUGIN_NAME "mysqlx")
+diff --git a/sql-common/client.cc b/sql-common/client.cc
+index 80ba726..6cb6546 100644
+--- a/sql-common/client.cc
++++ b/sql-common/client.cc
+@@ -100,6 +100,9 @@
+ #include "template_utils.h"
+ #include "typelib.h"
+ #include "violite.h"
++#ifdef __wasi__
++#include "mysql_wasi_socket_shim.h"
++#endif
+ 
+ #if !defined(_WIN32)
+ #include "my_thread.h" /* because of signal()*/
+@@ -128,6 +131,16 @@
+ #endif
+ 
+ #include <mysql/client_plugin.h>
++
++#if defined(__wasi__)
++#define MYSQL_CLIENT_SOCKET waasmtime_mysql_socket
++#define MYSQL_CLIENT_BIND waasmtime_mysql_bind
++#define MYSQL_CLIENT_GETSOCKNAME waasmtime_mysql_getsockname
++#else
++#define MYSQL_CLIENT_SOCKET socket
++#define MYSQL_CLIENT_BIND bind
++#define MYSQL_CLIENT_GETSOCKNAME getsockname
++#endif
+ #include <openssl/x509v3.h>
+ 
+ #include <new>
+@@ -5519,7 +5532,7 @@ void mpvio_info(Vio *vio, MYSQL_PLUGIN_VIO_INFO *info) {
+     case VIO_TYPE_SSL: {
+       struct sockaddr addr;
+       socklen_t addrlen = sizeof(addr);
+-      if (getsockname(vio_fd(vio), &addr, &addrlen)) return;
++      if (MYSQL_CLIENT_GETSOCKNAME(vio_fd(vio), &addr, &addrlen)) return;
+       info->protocol = addr.sa_family == AF_UNIX
+                            ? MYSQL_PLUGIN_VIO_INFO::MYSQL_VIO_SOCKET
+                            : MYSQL_PLUGIN_VIO_INFO::MYSQL_VIO_TCP;
+@@ -6462,7 +6475,7 @@ static mysql_state_machine_status csm_begin_connect(mysql_async_connect *ctx) {
+     }
+   }
+ #endif /* _WIN32 */
+-#if defined(HAVE_SYS_UN_H)
++#if defined(HAVE_SYS_UN_H) && !defined(__wasi__)
+   if (!net->vio &&
+       (!mysql->options.protocol ||
+        mysql->options.protocol == MYSQL_PROTOCOL_SOCKET) &&
+@@ -6612,7 +6625,8 @@ static mysql_state_machine_status csm_begin_connect(mysql_async_connect *ctx) {
+                  ("Create socket, family: %d  type: %d  proto: %d",
+                   t_res->ai_family, t_res->ai_socktype, t_res->ai_protocol));
+ 
+-      sock = socket(t_res->ai_family, t_res->ai_socktype, t_res->ai_protocol);
++      sock = MYSQL_CLIENT_SOCKET(t_res->ai_family, t_res->ai_socktype,
++                                 t_res->ai_protocol);
+       if (sock == INVALID_SOCKET) {
+         DBUG_PRINT("info", ("Socket created was invalid"));
+         /* Try next address if there is one */
+@@ -6634,8 +6648,9 @@ static mysql_state_machine_status csm_begin_connect(mysql_async_connect *ctx) {
+ 
+         while (curr_bind_ai != nullptr) {
+           /* Attempt to bind the socket to the given address */
+-          bind_result = bind(sock, curr_bind_ai->ai_addr,
+-                             static_cast<int>(curr_bind_ai->ai_addrlen));
++          bind_result = MYSQL_CLIENT_BIND(
++              sock, curr_bind_ai->ai_addr,
++              static_cast<int>(curr_bind_ai->ai_addrlen));
+           if (!bind_result) break; /* Success */
+ 
+           DBUG_PRINT("info", ("bind failed, attempting another bind address"));
+diff --git a/sql-common/get_password.cc b/sql-common/get_password.cc
+index eda297b..8663602 100644
+--- a/sql-common/get_password.cc
++++ b/sql-common/get_password.cc
+@@ -144,6 +144,10 @@ static void get_password(char *to, uint length, int fd, bool echo) {
+ #endif /* ! HAVE_GETPASS */
+ 
+ char *get_tty_password(const char *opt_message) {
++#if defined(__wasi__)
++  (void)opt_message;
++  return my_strdup(PSI_NOT_INSTRUMENTED, "", MYF(MY_FAE));
++#else
+ #ifdef HAVE_GETPASS
+   char *passbuff;
+ #else  /* ! HAVE_GETPASS */
+@@ -203,5 +207,6 @@ char *get_tty_password(const char *opt_message) {
+   */
+   buff[sizeof(buff) - 1] = '\0';
+   return my_strdup(PSI_NOT_INSTRUMENTED, buff, MYF(MY_FAE));
++#endif
+ }
+ #endif /* _WIN32 */
+diff --git a/sql/CMakeLists.txt b/sql/CMakeLists.txt
+index 902bd89..c8e6dce 100644
+--- a/sql/CMakeLists.txt
++++ b/sql/CMakeLists.txt
+@@ -74,14 +74,22 @@ SET_SOURCE_FILES_PROPERTIES(
+ 
+ # Gen_lex_token
+ # Make sure sql_yacc.h is generated before compiling gen_lex_token
+-MYSQL_ADD_EXECUTABLE(gen_lex_token
+-  gen_lex_token.cc
+-  DEPENDENCIES GenServerSource
+-  SKIP_INSTALL
+-  )
++IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI" AND
++    GEN_LEX_TOKEN_EXECUTABLE)
++  SET(GEN_LEX_TOKEN_COMMAND ${GEN_LEX_TOKEN_EXECUTABLE})
++  SET(GEN_LEX_TOKEN_DEPENDS)
++ELSE()
++  MYSQL_ADD_EXECUTABLE(gen_lex_token
++    gen_lex_token.cc
++    DEPENDENCIES GenServerSource
++    SKIP_INSTALL
++    )
++  SET(GEN_LEX_TOKEN_COMMAND gen_lex_token)
++  SET(GEN_LEX_TOKEN_DEPENDS gen_lex_token)
++ENDIF()
+ 
+ MY_CHECK_CXX_COMPILER_WARNING("-Wmissing-profile" HAS_MISSING_PROFILE)
+-IF(HAS_MISSING_PROFILE)
++IF(HAS_MISSING_PROFILE AND TARGET gen_lex_token)
+   ADD_COMPILE_FLAGS(
+     binlog_reader.cc  # In case we did not profile replication.
+     gen_lex_token.cc  # This is a compile-time tool.
+@@ -90,31 +98,45 @@ ENDIF()
+ 
+ ADD_CUSTOM_COMMAND(
+   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/lex_token.h
+-  COMMAND gen_lex_token > lex_token.h
+-  DEPENDS gen_lex_token
++  COMMAND ${GEN_LEX_TOKEN_COMMAND} > lex_token.h
++  DEPENDS ${GEN_LEX_TOKEN_DEPENDS}
+ )
+ 
+ # gen_keyword_list
+ # Make sure sql_yacc.h is generated before compiling gen_keyword_list
+-MYSQL_ADD_EXECUTABLE(gen_keyword_list
+-  gen_keyword_list.cc
+-  DEPENDENCIES GenServerSource
+-  LINK_LIBRARIES ext::icu
+-  SKIP_INSTALL
+-  )
++IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI" AND
++    GEN_KEYWORD_LIST_EXECUTABLE)
++  GET_FILENAME_COMPONENT(GEN_KEYWORD_LIST_DIR
++    ${GEN_KEYWORD_LIST_EXECUTABLE} DIRECTORY)
++  SET(GEN_KEYWORD_LIST_COMMAND
++    ${CMAKE_COMMAND} -E env "LD_LIBRARY_PATH=${GEN_KEYWORD_LIST_DIR}/lib"
++    ${GEN_KEYWORD_LIST_EXECUTABLE})
++  SET(GEN_KEYWORD_LIST_DEPENDS)
++ELSE()
++  MYSQL_ADD_EXECUTABLE(gen_keyword_list
++    gen_keyword_list.cc
++    DEPENDENCIES GenServerSource
++    LINK_LIBRARIES ext::icu
++    SKIP_INSTALL
++    )
++  SET(GEN_KEYWORD_LIST_COMMAND gen_keyword_list)
++  SET(GEN_KEYWORD_LIST_DEPENDS gen_keyword_list)
++ENDIF()
+ 
+-IF(WITH_LTO OR CMAKE_COMPILER_FLAG_WITH_LTO)
++IF((WITH_LTO OR CMAKE_COMPILER_FLAG_WITH_LTO) AND TARGET gen_keyword_list)
+   TARGET_COMPILE_OPTIONS(gen_keyword_list PRIVATE "-fno-lto")
+ ENDIF()
+ 
+-IF(HAS_MISSING_PROFILE)
++IF(HAS_MISSING_PROFILE AND TARGET gen_keyword_list)
+   ADD_COMPILE_FLAGS(gen_keyword_list.cc COMPILE_FLAGS ${HAS_MISSING_PROFILE})
+ ENDIF()
+ 
+ ADD_CUSTOM_COMMAND(
+   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/keyword_list.h
+-  COMMAND gen_keyword_list ${CMAKE_CURRENT_SOURCE_DIR}/sql_yacc.yy > ${CMAKE_CURRENT_BINARY_DIR}/keyword_list.h
+-  DEPENDS gen_keyword_list
++  COMMAND ${GEN_KEYWORD_LIST_COMMAND}
++    ${CMAKE_CURRENT_SOURCE_DIR}/sql_yacc.yy
++    > ${CMAKE_CURRENT_BINARY_DIR}/keyword_list.h
++  DEPENDS ${GEN_KEYWORD_LIST_DEPENDS}
+ )
+ 
+ ADD_DEFINITIONS(-DMYSQL_SERVER)
+@@ -1354,9 +1376,17 @@ SET_SOURCE_FILES_PROPERTIES(
+ )
+ 
+ # Gen_lex_hash
+-MYSQL_ADD_EXECUTABLE(gen_lex_hash gen_lex_hash.cc SKIP_INSTALL)
++IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI" AND
++    GEN_LEX_HASH_EXECUTABLE)
++  SET(GEN_LEX_HASH_COMMAND ${GEN_LEX_HASH_EXECUTABLE})
++  SET(GEN_LEX_HASH_DEPENDS)
++ELSE()
++  MYSQL_ADD_EXECUTABLE(gen_lex_hash gen_lex_hash.cc SKIP_INSTALL)
++  SET(GEN_LEX_HASH_COMMAND gen_lex_hash)
++  SET(GEN_LEX_HASH_DEPENDS gen_lex_hash)
++ENDIF()
+ 
+-IF(HAS_MISSING_PROFILE)
++IF(HAS_MISSING_PROFILE AND TARGET gen_lex_hash)
+   ADD_COMPILE_FLAGS(
+     gen_lex_hash.cc
+     binlog/log_sanitizer.cc
+@@ -1365,8 +1395,8 @@ ENDIF()
+ 
+ ADD_CUSTOM_COMMAND(
+   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/lex_hash.h
+-  COMMAND gen_lex_hash > lex_hash.h
+-  DEPENDS gen_lex_hash
++  COMMAND ${GEN_LEX_HASH_COMMAND} > lex_hash.h
++  DEPENDS ${GEN_LEX_HASH_DEPENDS}
+ )
+ 
+ MYSQL_ADD_EXECUTABLE(mysql_tzinfo_to_sql
+diff --git a/sql/conn_handler/socket_connection.cc b/sql/conn_handler/socket_connection.cc
+index 2463f6a..c2429f8 100644
+--- a/sql/conn_handler/socket_connection.cc
++++ b/sql/conn_handler/socket_connection.cc
+@@ -87,6 +87,12 @@ extern "C" {
+ #endif
+ #include "connection_handler_manager.h"
+ 
++#if defined(__wasi__)
++#define MYSQL_SOCKET_CONNECTION_POLL(...) waasmtime_mysql_poll(__VA_ARGS__)
++#else
++#define MYSQL_SOCKET_CONNECTION_POLL(...) poll(__VA_ARGS__)
++#endif
++
+ using std::max;
+ 
+ // Test accept this many times
+@@ -611,7 +617,7 @@ class TCP_socket {
+   }
+ };
+ 
+-#if defined(HAVE_SYS_UN_H)
++#if defined(HAVE_SYS_UN_H) && !defined(__wasi__)
+ ///////////////////////////////////////////////////////////////////////////
+ // Unix_socket implementation
+ ///////////////////////////////////////////////////////////////////////////
+@@ -1079,7 +1085,7 @@ static bool handle_admin_socket(
+ 
+   while (!connection_events_loop_aborted()) {
+ #ifdef HAVE_POLL
+-    const int retval = poll(fds, NUMBER_OF_POLLED_FDS, -1);
++    const int retval = MYSQL_SOCKET_CONNECTION_POLL(fds, NUMBER_OF_POLLED_FDS, -1);
+ #else
+     fd_set read_fds = client_fds;
+     const int retval =
+@@ -1286,7 +1292,7 @@ bool Mysqld_socket_listener::setup_listener() {
+                                    Socket_interface_type::DEFAULT_INTERFACE);
+     }
+   }
+-#if defined(HAVE_SYS_UN_H)
++#if defined(HAVE_SYS_UN_H) && !defined(__wasi__)
+   // Setup unix socket listener
+   if (m_unix_sockname != "") {
+     Unix_socket unix_socket(&m_unix_sockname, m_backlog);
+@@ -1348,7 +1354,8 @@ const Listen_socket *Mysqld_socket_listener::get_listen_socket() const {
+ 
+ Channel_info *Mysqld_socket_listener::listen_for_connection_event() {
+ #ifdef HAVE_POLL
+-  int retval = poll(&m_poll_info.m_fds[0], m_socket_vector.size(), -1);
++  int retval =
++      MYSQL_SOCKET_CONNECTION_POLL(&m_poll_info.m_fds[0], m_socket_vector.size(), -1);
+ #else
+   m_select_info.m_read_fds = m_select_info.m_client_fds;
+   int retval = select((int)m_select_info.m_max_used_connection,
+diff --git a/sql/mysqld.cc b/sql/mysqld.cc
+index 01a572c..bcd0f22 100644
+--- a/sql/mysqld.cc
++++ b/sql/mysqld.cc
+@@ -3693,6 +3693,11 @@ void my_init_signals() {
+ }
+ 
+ static void start_signal_handler() {
++#if defined(__wasi__)
++  main_thread_id = my_thread_self();
++  return;
++#endif
++
+   int error;
+   my_thread_attr_t thr_attr;
+   DBUG_TRACE;
+diff --git a/sql/mysqld_daemon.cc b/sql/mysqld_daemon.cc
+index 54c7385..b6a0038 100644
+--- a/sql/mysqld_daemon.cc
++++ b/sql/mysqld_daemon.cc
+@@ -54,6 +54,9 @@ bool is_daemon_proc = false;
+ bool mysqld::runtime::is_daemon() { return is_daemon_proc; }
+ 
+ int mysqld::runtime::mysqld_daemonize() {
++#if defined(__wasi__)
++  return -2;
++#else
+   int pipe_fd[2];
+   if (pipe(pipe_fd) < 0) return -2;
+ 
+@@ -127,6 +130,7 @@ int mysqld::runtime::mysqld_daemonize() {
+       _exit(MYSQLD_SUCCESS_EXIT);
+     }
+   }
++#endif
+ }
+ 
+ /**
+@@ -143,6 +147,10 @@ int mysqld::runtime::mysqld_daemonize() {
+   This notifies the parent which is block on read end of pipe.
+ */
+ void mysqld::runtime::signal_parent(int pipe_write_fd, char status) {
++#if defined(__wasi__)
++  (void)pipe_write_fd;
++  (void)status;
++#else
+   if (pipe_write_fd != -1) {
+     while (write(pipe_write_fd, &status, 1) == -1 && errno == EINTR) {
+       // Retry write syscall if errno is EINTR.
+@@ -150,4 +158,5 @@ void mysqld::runtime::signal_parent(int pipe_write_fd, char status) {
+ 
+     close(pipe_write_fd);
+   }
++#endif
+ }
+diff --git a/sql/resourcegroups/platform/thread_attrs_api_common.cc b/sql/resourcegroups/platform/thread_attrs_api_common.cc
+index fa840d6..9f1a978 100644
+--- a/sql/resourcegroups/platform/thread_attrs_api_common.cc
++++ b/sql/resourcegroups/platform/thread_attrs_api_common.cc
+@@ -35,6 +35,36 @@ int min_thread_priority_value() { return -20; }
+ 
+ int max_thread_priority_value() { return 19; }
+ 
++#if defined(__wasi__)
++bool is_platform_supported() { return false; }
++
++bool bind_to_cpu(cpu_id_t) { return true; }
++
++bool bind_to_cpu(cpu_id_t, my_thread_os_id_t) { return true; }
++
++bool bind_to_cpus(const std::vector<cpu_id_t> &) { return true; }
++
++bool bind_to_cpus(const std::vector<cpu_id_t> &, my_thread_os_id_t) {
++  return true;
++}
++
++bool unbind_thread() { return true; }
++
++bool unbind_thread(my_thread_os_id_t) { return true; }
++
++int thread_priority(my_thread_os_id_t) { return 0; }
++
++bool set_thread_priority(int) { return true; }
++
++bool set_thread_priority(int, my_thread_os_id_t) { return true; }
++
++uint32_t num_vcpus_using_affinity() { return 0; }
++
++uint32_t num_vcpus_using_config() { return 1; }
++
++bool can_thread_priority_be_set() { return false; }
++#endif
++
+ uint32_t num_vcpus() {
+   uint32_t nprocs = num_vcpus_using_affinity();
+   if (nprocs == 0) nprocs = num_vcpus_using_config();
+diff --git a/sql/sd_notify.cc b/sql/sd_notify.cc
+index 5593899..adb4b9d 100644
+--- a/sql/sd_notify.cc
++++ b/sql/sd_notify.cc
+@@ -47,6 +47,9 @@
+ #include "my_sys.h"                                  // my_strerror
+ #include "mysql/components/services/log_builtins.h"  // error logging
+ #include "scope_guard.h"                             // scope_guard
++#ifdef __wasi__
++#include "mysql_wasi_socket_shim.h"
++#endif
+ #include "sql/log.h"                                 // error logging
+ 
+ namespace sysd {
+@@ -61,6 +64,9 @@ std::stringstream NotifyGlobals::fmt;
+   NOTIFY_SOCKET. Connects NotifyGlobals::socket to it if present.
+ */
+ void notify_connect() {
++#if defined(__wasi__)
++  return;
++#else
+ #ifndef _WIN32
+   const char *sockstr = getenv("NOTIFY_SOCKET");
+   if (sockstr == nullptr) {
+@@ -79,7 +85,11 @@ void notify_connect() {
+            sunpathlen);
+     return;
+   }
++#if defined(__wasi__)
++  NotifyGlobals::socket = waasmtime_mysql_socket(AF_UNIX, SOCK_DGRAM, 0);
++#else
+   NotifyGlobals::socket = socket(AF_UNIX, SOCK_DGRAM, 0);
++#endif
+ 
+   sockaddr_un addr;
+   socklen_t addrlen;
+@@ -95,8 +105,13 @@ void notify_connect() {
+   }
+   int ret = -1;
+   do {
++#if defined(__wasi__)
++    ret = waasmtime_mysql_connect(NotifyGlobals::socket,
++                                  reinterpret_cast<const sockaddr *>(&addr), addrlen);
++#else
+     ret = connect(NotifyGlobals::socket,
+                   reinterpret_cast<const sockaddr *>(&addr), addrlen);
++#endif
+   } while (ret == -1 && errno == EINTR);
+   if (ret == -1) {
+     char errbuf[512];
+@@ -105,6 +120,7 @@ void notify_connect() {
+     NotifyGlobals::socket = -1;
+   }
+ #endif /* not defined _WIN32 */
++#endif
+ }
+ 
+ #ifndef _WIN32
+@@ -114,6 +130,10 @@ void notify_connect() {
+   string to notification socket.
+  */
+ void notify() {
++#if defined(__wasi__)
++  NotifyGlobals::fmt.str("");
++  return;
++#else
+   std::string note = NotifyGlobals::fmt.str();
+   const char *src = note.c_str();
+   const char *end = src + note.size();
+@@ -139,7 +159,11 @@ void notify() {
+ 
+   while (true) {
+     size_t remaining = end - src;
++#if defined(__wasi__)
++    status = waasmtime_mysql_send(NotifyGlobals::socket, src, remaining, 0);
++#else
+     status = write(NotifyGlobals::socket, src, remaining);
++#endif
+     if (status == -1) {
+       if (errno == EINTR) {
+         continue;
+@@ -157,6 +181,7 @@ void notify() {
+     LogErr(WARNING_LEVEL, ER_SYSTEMD_NOTIFY_WRITE_FAILED, note.c_str(),
+            my_strerror(errbuf, sizeof(errbuf) - 1, errno));
+   }
++#endif
+ }
+ #endif /* not defined _WIN32 */
+ }  // namespace sysd
+diff --git a/sql/sql_restart_server.cc b/sql/sql_restart_server.cc
+index f53e9e6..f910edf 100644
+--- a/sql/sql_restart_server.cc
++++ b/sql/sql_restart_server.cc
+@@ -56,7 +56,9 @@ static inline bool check_restart_server_admin_privilege(THD *thd) {
+ }
+ 
+ bool is_mysqld_managed() {
+-#ifndef _WIN32
++#if defined(__wasi__)
++  return false;
++#elif !defined(_WIN32)
+   char *parent_pid = getenv("MYSQLD_PARENT_PID");
+   if (parent_pid == nullptr) return false;
+ 
+diff --git a/storage/innobase/innodb.cmake b/storage/innobase/innodb.cmake
+index 6b4f458..ce6e8ca 100644
+--- a/storage/innobase/innodb.cmake
++++ b/storage/innobase/innodb.cmake
+@@ -104,6 +104,9 @@ IF(WITH_INNODB_EXTRA_DEBUG)
+ ENDIF()
+ 
+ CHECK_FUNCTION_EXISTS(sched_getcpu  HAVE_SCHED_GETCPU)
++IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI")
++ SET(HAVE_SCHED_GETCPU 0 CACHE INTERNAL "WASI has no sched_getcpu" FORCE)
++ENDIF()
+ IF(HAVE_SCHED_GETCPU)
+  ADD_DEFINITIONS(-DHAVE_SCHED_GETCPU=1)
+ ENDIF()
+diff --git a/storage/innobase/os/os0file.cc b/storage/innobase/os/os0file.cc
+index 5218e18..ecb5258 100644
+--- a/storage/innobase/os/os0file.cc
++++ b/storage/innobase/os/os0file.cc
+@@ -45,6 +45,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+ #include "log0write.h"
+ #include "my_dbug.h"
+ #include "my_io.h"
++#include "my_sys.h"
+ 
+ #include "fil0fil.h"
+ #include "ha_prototypes.h"
+@@ -86,6 +87,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+ #endif /* HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE */
+ 
+ #include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
+ #include <lz4.h>
+ #include "my_aes.h"
+ #include "my_rnd.h"
+@@ -93,6 +99,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+ #include "mysqld.h"
+ 
+ #include <sys/types.h>
++#include <unistd.h>
+ #include <zlib.h>
+ #include <ctime>
+ #include <functional>
+@@ -178,7 +185,7 @@ bool os_is_o_direct_supported() {
+ 
+   /* Try to create a temp file with O_DIRECT flag. */
+   file_handle =
+-      ::open(file_name, O_CREAT | O_TRUNC | O_WRONLY | O_DIRECT, S_IRWXU);
++      os_wasi_file_open(file_name, O_CREAT | O_TRUNC | O_WRONLY | O_DIRECT, S_IRWXU);
+ 
+   /* If Failed due to no O_DIRECT support, errno EINVAL is set, but file is
+ still created. See Kernel Bugzilla Bug 218049 */
+@@ -194,7 +201,7 @@ still created. See Kernel Bugzilla Bug 218049 */
+     return (false);
+   }
+ 
+-  ::close(file_handle);
++  os_wasi_file_close(file_handle);
+   unlink(file_name);
+   ut::free(file_name);
+ 
+@@ -306,6 +313,145 @@ mysql_pfs_key_t innodb_arch_file_key;
+ mysql_pfs_key_t innodb_clone_file_key;
+ #endif /* UNIV_PFS_IO */
+ 
++#if defined(__wasi__)
++extern "C" {
++__attribute__((import_module("waasmtime_mysql_files"), import_name("open")))
++int32_t waasmtime_mysql_file_open(const char *path, int32_t flags,
++                                  int32_t mode);
++__attribute__((import_module("waasmtime_mysql_files"), import_name("close")))
++int32_t waasmtime_mysql_file_close(int32_t fd);
++__attribute__((import_module("waasmtime_mysql_files"), import_name("pread")))
++int32_t waasmtime_mysql_file_pread(int32_t fd, void *buf, int32_t len,
++                                   int64_t offset);
++__attribute__((import_module("waasmtime_mysql_files"), import_name("pwrite")))
++int32_t waasmtime_mysql_file_pwrite(int32_t fd, const void *buf, int32_t len,
++                                    int64_t offset);
++__attribute__((import_module("waasmtime_mysql_files"), import_name("seek")))
++int64_t waasmtime_mysql_file_seek(int32_t fd, int64_t offset, int32_t whence);
++__attribute__((import_module("waasmtime_mysql_files"), import_name("truncate")))
++int32_t waasmtime_mysql_file_truncate(int32_t fd, int64_t size);
++__attribute__((import_module("waasmtime_mysql_files"), import_name("sync")))
++int32_t waasmtime_mysql_file_sync(int32_t fd, int32_t data_only);
++}
++
++static const char *os_wasi_resolve_path(const char *path, char *buffer,
++                                        size_t buffer_len) {
++  if (path == nullptr || path[0] == '/' || buffer_len == 0) {
++    return path;
++  }
++
++  char cwd[FN_REFLEN];
++  if (getcwd(cwd, sizeof(cwd)) == nullptr) {
++    return path;
++  }
++
++  int written = snprintf(buffer, buffer_len, "%s/%s", cwd, path);
++  if (written < 0 || static_cast<size_t>(written) >= buffer_len) {
++    errno = ENAMETOOLONG;
++    return nullptr;
++  }
++
++  return buffer;
++}
++
++static int os_wasi_decode_i32(int32_t rc) {
++  if (rc < 0) {
++    errno = -rc;
++    return -1;
++  }
++  return rc;
++}
++
++static ssize_t os_wasi_decode_ssize(int32_t rc) {
++  if (rc < 0) {
++    errno = -rc;
++    return -1;
++  }
++  return static_cast<ssize_t>(rc);
++}
++
++static int os_wasi_file_open(const char *path, int flags, mode_t mode) {
++  char resolved[FN_REFLEN];
++  const char *host_path = os_wasi_resolve_path(path, resolved, sizeof(resolved));
++  if (host_path == nullptr) {
++    return -1;
++  }
++  return os_wasi_decode_i32(
++      waasmtime_mysql_file_open(host_path, flags, static_cast<int32_t>(mode)));
++}
++
++static int os_wasi_file_close(int fd) {
++  return os_wasi_decode_i32(waasmtime_mysql_file_close(fd));
++}
++
++static ssize_t os_wasi_file_pread(int fd, void *buf, size_t len,
++                                  os_offset_t offset) {
++  if (len > INT32_MAX) {
++    errno = EINVAL;
++    return -1;
++  }
++  return os_wasi_decode_ssize(waasmtime_mysql_file_pread(
++      fd, buf, static_cast<int32_t>(len), static_cast<int64_t>(offset)));
++}
++
++static ssize_t os_wasi_file_pwrite(int fd, const void *buf, size_t len,
++                                   os_offset_t offset) {
++  if (len > INT32_MAX) {
++    errno = EINVAL;
++    return -1;
++  }
++  return os_wasi_decode_ssize(waasmtime_mysql_file_pwrite(
++      fd, buf, static_cast<int32_t>(len), static_cast<int64_t>(offset)));
++}
++
++static os_offset_t os_wasi_file_seek(int fd, os_offset_t offset, int whence) {
++  int64_t rc =
++      waasmtime_mysql_file_seek(fd, static_cast<int64_t>(offset), whence);
++  if (rc < 0) {
++    errno = static_cast<int>(-rc);
++    return static_cast<os_offset_t>(-1);
++  }
++  return static_cast<os_offset_t>(rc);
++}
++
++static int os_wasi_file_truncate(int fd, os_offset_t size) {
++  return os_wasi_decode_i32(
++      waasmtime_mysql_file_truncate(fd, static_cast<int64_t>(size)));
++}
++
++static int os_wasi_file_sync(int fd, bool data_only) {
++  return os_wasi_decode_i32(waasmtime_mysql_file_sync(fd, data_only ? 1 : 0));
++}
++#else
++static int os_wasi_file_open(const char *path, int flags, mode_t mode) {
++  return ::open(path, flags, mode);
++}
++
++static int os_wasi_file_close(int fd) { return close(fd); }
++
++static ssize_t os_wasi_file_pread(int fd, void *buf, size_t len,
++                                  os_offset_t offset) {
++  return pread(fd, buf, len, offset);
++}
++
++static ssize_t os_wasi_file_pwrite(int fd, const void *buf, size_t len,
++                                   os_offset_t offset) {
++  return pwrite(fd, buf, len, offset);
++}
++
++static os_offset_t os_wasi_file_seek(int fd, os_offset_t offset, int whence) {
++  return lseek(fd, offset, whence);
++}
++
++static int os_wasi_file_truncate(int fd, os_offset_t size) {
++  return ftruncate(fd, size);
++}
++
++static int os_wasi_file_sync(int fd, bool data_only) {
++  return data_only ? fdatasync(fd) : fsync(fd);
++}
++#endif
++
+ /** The asynchronous I/O context */
+ struct Slot {
+   /** Default constructor/assignment etc. are OK */
+@@ -1448,12 +1594,13 @@ static bool os_aio_validate_skip() {
+ 
+ #undef USE_FILE_LOCK
+ #define USE_FILE_LOCK
+-#if defined(UNIV_HOTBACKUP) || defined(_WIN32)
++#if defined(UNIV_HOTBACKUP) || defined(_WIN32) || defined(__wasi__)
+ /* InnoDB Hot Backup does not lock the data files.
+  On Windows, mandatory locking is used.
++ WASI preview1 does not provide POSIX advisory file locks.
+  */
+ #undef USE_FILE_LOCK
+-#endif /* UNIV_HOTBACKUP || _WIN32 */
++#endif /* UNIV_HOTBACKUP || _WIN32 || __wasi__ */
+ #ifdef USE_FILE_LOCK
+ /** Obtain an exclusive lock on a file.
+ @param[in]      fd              file descriptor
+@@ -1572,19 +1719,33 @@ void AIO::release_with_mutex(Slot *slot) {
+ 
+ FILE *os_file_create_tmpfile() {
+   FILE *file = nullptr;
++#if defined(__wasi__)
++  char filename[FN_REFLEN];
++  int fd = create_temp_file(filename, mysql_tmpdir, "ib", O_CREAT | O_EXCL | O_RDWR,
++                            KEEP_FILE, MYF(MY_WME));
++
++  if (fd >= 0) {
++    my_close(fd, MYF(MY_WME));
++    file = fopen(filename, "w+b");
++    my_delete(filename, MYF(0));
++  }
++#else
+   int fd = innobase_mysql_tmpfile(mysql_tmpdir);
+ 
+   if (fd >= 0) {
+     file = fdopen(fd, "w+b");
+   }
++#endif
+ 
+   if (file == nullptr) {
+     ib::error(ER_IB_MSG_751) << "Unable to create temporary file inside \""
+                              << mysql_tmpdir << "\"; errno: " << errno;
+ 
++#if !defined(__wasi__)
+     if (fd >= 0) {
+       close(fd);
+     }
++#endif
+   }
+ 
+   return (file);
+@@ -2032,10 +2193,10 @@ ssize_t SyncFileIO::execute(const IORequest &request) {
+   ssize_t n_bytes;
+ 
+   if (request.is_read()) {
+-    n_bytes = pread(m_fh, m_buf, m_n, m_offset);
++    n_bytes = os_wasi_file_pread(m_fh, m_buf, m_n, m_offset);
+   } else {
+     ut_ad(request.is_write());
+-    n_bytes = pwrite(m_fh, m_buf, m_n, m_offset);
++    n_bytes = os_wasi_file_pwrite(m_fh, m_buf, m_n, m_offset);
+   }
+ 
+   return (n_bytes);
+@@ -2827,9 +2988,9 @@ static int os_file_fsync_posix(os_file_t file) {
+ #endif /* UNIV_HOTBACKUP */
+ 
+ #if defined(HAVE_FDATASYNC) && defined(HAVE_DECL_FDATASYNC)
+-    const auto ret = srv_use_fdatasync ? fdatasync(file) : fsync(file);
++    const auto ret = os_wasi_file_sync(file, srv_use_fdatasync);
+ #else  /* !(HAVE_FDATASYNC && HAVE_DECL_FDATASYNC) */
+-    const auto ret = fsync(file);
++    const auto ret = os_wasi_file_sync(file, false);
+ #endif /* !(HAVE_FDATASYNC && HAVE_DECL_FDATASYNC) */
+ 
+     if (ret == 0) {
+@@ -2879,6 +3040,11 @@ static int os_file_fsync_posix(os_file_t file) {
+ static void os_parent_dir_fsync_posix(const char *path) {
+   ut_a(path[0] != '\0');
+ 
++#if defined(__wasi__)
++  /* WASI preview1 has no portable parent-directory fsync operation. */
++  return;
++#endif
++
+   auto parent_in_path = os_file_get_parent_dir(path);
+   const char *parent_dir = parent_in_path;
+   if (parent_in_path == nullptr) {
+@@ -3174,7 +3340,7 @@ pfs_os_file_t os_file_create_func(const char *name, ulint create_mode,
+   bool retry;
+ 
+   do {
+-    file.m_file = ::open(name, create_flag, os_innodb_umask);
++    file.m_file = os_wasi_file_open(name, create_flag, os_innodb_umask);
+ 
+     if (file.m_file == -1) {
+       const char *operation;
+@@ -3247,7 +3413,7 @@ pfs_os_file_t os_file_create_func(const char *name, ulint create_mode,
+     }
+ 
+     *success = false;
+-    close(file.m_file);
++    os_wasi_file_close(file.m_file);
+     file.m_file = -1;
+   }
+ #endif /* USE_FILE_LOCK */
+@@ -3301,7 +3467,7 @@ pfs_os_file_t os_file_create_simple_no_error_handling_func(
+     return (file);
+   }
+ 
+-  file.m_file = ::open(name, create_flag, umask);
++  file.m_file = os_wasi_file_open(name, create_flag, umask);
+ 
+   *success = (file.m_file != -1);
+ 
+@@ -3309,7 +3475,7 @@ pfs_os_file_t os_file_create_simple_no_error_handling_func(
+   if (!read_only && *success && access_type == OS_FILE_READ_WRITE &&
+       os_file_lock(file.m_file, name)) {
+     *success = false;
+-    close(file.m_file);
++    os_wasi_file_close(file.m_file);
+     file.m_file = -1;
+   }
+ #endif /* USE_FILE_LOCK */
+@@ -3414,7 +3580,7 @@ os_file_get_last_error.
+ @param[in]      file            Handle to a file
+ @return true if success */
+ bool os_file_close_func(os_file_t file) {
+-  int ret = close(file);
++  int ret = os_wasi_file_close(file);
+ 
+   if (ret == -1) {
+     os_file_handle_error(nullptr, "close");
+@@ -3430,10 +3596,10 @@ bool os_file_close_func(os_file_t file) {
+ @return file size, or (os_offset_t) -1 on failure */
+ os_offset_t os_file_get_size(pfs_os_file_t file) {
+   /* Store current position */
+-  os_offset_t pos = lseek(file.m_file, 0, SEEK_CUR);
+-  os_offset_t file_size = lseek(file.m_file, 0, SEEK_END);
++  os_offset_t pos = os_wasi_file_seek(file.m_file, 0, SEEK_CUR);
++  os_offset_t file_size = os_wasi_file_seek(file.m_file, 0, SEEK_END);
+   /* Restore current position as the function should not change it */
+-  lseek(file.m_file, pos, SEEK_SET);
++  os_wasi_file_seek(file.m_file, pos, SEEK_SET);
+   return (file_size);
+ }
+ 
+@@ -3525,18 +3691,21 @@ static dberr_t os_file_get_status_posix(const char *path,
+ 
+   stat_info->size = statinfo->st_size;
+   stat_info->block_size = statinfo->st_blksize;
++  if (stat_info->block_size == 0) {
++    stat_info->block_size = UNIV_SECTOR_SIZE;
++  }
+   stat_info->alloc_size = statinfo->st_blocks * 512;
+ 
+   if (check_rw_perm && (stat_info->type == OS_FILE_TYPE_FILE ||
+                         stat_info->type == OS_FILE_TYPE_BLOCK)) {
+     int access = !read_only ? O_RDWR : O_RDONLY;
+-    int fh = ::open(path, access, os_innodb_umask);
++    int fh = os_wasi_file_open(path, access, os_innodb_umask);
+ 
+     if (fh == -1) {
+       stat_info->rw_perm = false;
+     } else {
+       stat_info->rw_perm = true;
+-      close(fh);
++      os_wasi_file_close(fh);
+     }
+   }
+ 
+@@ -3552,7 +3721,7 @@ size of the file.
+ @return true if success */
+ static bool os_file_truncate_posix(const char *pathname, pfs_os_file_t file,
+                                    os_offset_t size) {
+-  int res = ftruncate(file.m_file, size);
++  int res = os_wasi_file_truncate(file.m_file, size);
+   if (res == -1) {
+     bool retry;
+ 
+@@ -3578,7 +3747,7 @@ bool os_file_set_eof(FILE *file) /*!< in: file to be truncated */
+ @param[in]      file            Handle to a file
+ @return true if success */
+ bool os_file_close_no_error_handling(os_file_t file) {
+-  return (close(file) != -1);
++  return (os_wasi_file_close(file) != -1);
+ }
+ #endif /* UNIV_HOTBACKUP */
+ 
+@@ -5289,6 +5458,9 @@ void os_file_set_nocache(int fd [[maybe_unused]],
+                          const char *file_name [[maybe_unused]],
+                          const char *operation_name [[maybe_unused]],
+                          bool on_error_silent [[maybe_unused]]) {
++#if defined(__wasi__)
++  return;
++#else
+ /* some versions of Solaris may not have DIRECTIO_ON */
+ #if defined(UNIV_SOLARIS) && defined(DIRECTIO_ON)
+   if (directio(fd, DIRECTIO_ON) == -1 && !on_error_silent) {
+@@ -5330,6 +5502,7 @@ void os_file_set_nocache(int fd [[maybe_unused]],
+     }
+   }
+ #endif /* !(UNIV_SOLARIS && DIRECTIO_ON) && O_DIRECT */
++#endif /* __wasi__ */
+ }
+ 
+ bool os_file_set_size_fast(const char *name, pfs_os_file_t pfs_file,
+@@ -5490,7 +5663,7 @@ bool os_file_seek(const char *pathname, os_file_t file, os_offset_t offset) {
+ #else  /* !_WIN32 */
+   off_t ret;
+ 
+-  ret = lseek(file, offset, SEEK_SET);
++  ret = os_wasi_file_seek(file, offset, SEEK_SET);
+ 
+   if (ret == -1) {
+     success = false;
+@@ -6270,8 +6443,8 @@ void os_fusionio_get_sector_size() {
+     strcat(check_file_name + dir_len, "/check_sector_size");
+ 
+     /* Create a tmp file for checking sector size. */
+-    check_file = ::open(check_file_name,
+-                        O_CREAT | O_TRUNC | O_WRONLY | O_DIRECT, S_IRWXU);
++    check_file = os_wasi_file_open(
++        check_file_name, O_CREAT | O_TRUNC | O_WRONLY | O_DIRECT, S_IRWXU);
+ 
+     if (check_file == -1) {
+       ib::error(ER_IB_MSG_830)
+@@ -6290,7 +6463,7 @@ void os_fusionio_get_sector_size() {
+ 
+     while (sector_size <= MAX_SECTOR_SIZE) {
+       block_ptr = static_cast<byte *>(ut_align(&data, sector_size));
+-      ret = pwrite(check_file, block_ptr, sector_size, 0);
++      ret = os_wasi_file_pwrite(check_file, block_ptr, sector_size, 0);
+       if (ret > 0 && (ulint)ret == sector_size) {
+         break;
+       }
+@@ -6300,7 +6473,7 @@ void os_fusionio_get_sector_size() {
+     /* The sector size should <= MAX_SECTOR_SIZE. */
+     ut_ad(sector_size <= MAX_SECTOR_SIZE);
+ 
+-    close(check_file);
++    os_wasi_file_close(check_file);
+     unlink(check_file_name);
+ 
+     ut::free(check_file_name);
+diff --git a/storage/myisam/my_lock.cc b/storage/myisam/my_lock.cc
+index 5987159..6da1bd7 100644
+--- a/storage/myisam/my_lock.cc
++++ b/storage/myisam/my_lock.cc
+@@ -40,7 +40,7 @@
+ #include "mysys_err.h"
+ #include "storage/myisam/myisam_sys.h"
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__wasi__)
+ #include <signal.h>
+ 
+ extern "C" {
+@@ -53,7 +53,7 @@ static void my_set_alarm_variable(int signo [[maybe_unused]]) {
+   my_have_got_alarm = 1; /* Tell program that time expired */
+ }
+ }  // extern C
+-#endif /* !_WIN32 */
++#endif /* !_WIN32 && !__wasi__ */
+ 
+ #ifdef _WIN32
+ #define WIN_LOCK_INFINITE -1
+@@ -180,6 +180,10 @@ int my_lock(File fd, int locktype, myf MyFlags) {
+     lock.l_start = 0;
+     lock.l_len = 0;  // End of file.
+ 
++#if defined(__wasi__)
++    if (fcntl(fd, (MyFlags & MY_DONT_WAIT) ? F_SETLK : F_SETLKW, &lock) != -1)
++      return 0;
++#else
+     if (MyFlags & MY_DONT_WAIT) {
+       int value;
+       uint alarm_old;
+@@ -202,6 +206,7 @@ int my_lock(File fd, int locktype, myf MyFlags) {
+       if (errno == EINTR) errno = EAGAIN;
+     } else if (fcntl(fd, F_SETLKW, &lock) != -1) /* Wait until a lock */
+       return 0;
++#endif
+   }
+ #endif /* _WIN32 */
+ 
+diff --git a/strings/CMakeLists.txt b/strings/CMakeLists.txt
+index 27d403f..659a23d 100644
+--- a/strings/CMakeLists.txt
++++ b/strings/CMakeLists.txt
+@@ -57,10 +57,18 @@ SET(STRINGS_SOURCES
+   xml.cc
+ )
+ 
+-MYSQL_ADD_EXECUTABLE(uca9dump uca9-dump.cc SKIP_INSTALL)
++IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI" AND
++    UCA9DUMP_EXECUTABLE)
++  SET(UCA9DUMP_COMMAND ${UCA9DUMP_EXECUTABLE})
++  SET(UCA9DUMP_DEPENDS)
++ELSE()
++  MYSQL_ADD_EXECUTABLE(uca9dump uca9-dump.cc SKIP_INSTALL)
++  SET(UCA9DUMP_COMMAND uca9dump)
++  SET(UCA9DUMP_DEPENDS uca9dump)
++ENDIF()
+ 
+ MY_CHECK_CXX_COMPILER_WARNING("-Wmissing-profile" HAS_MISSING_PROFILE)
+-IF(HAS_MISSING_PROFILE)
++IF(HAS_MISSING_PROFILE AND TARGET uca9dump)
+   ADD_COMPILE_FLAGS(uca9-dump.cc COMPILE_FLAGS ${HAS_MISSING_PROFILE})
+ ENDIF()
+ 
+@@ -71,19 +79,19 @@ SET(JA_HANS_DST_FILE ${CMAKE_BINARY_DIR}/strings/uca900_ja_tbls.cc)
+ 
+ ADD_CUSTOM_COMMAND(
+   OUTPUT ${JA_HANS_DST_FILE}
+-  COMMAND uca9dump ja
++  COMMAND ${UCA9DUMP_COMMAND} ja
+   --in_file=${JA_HANS_SRC_FILE}
+   --out_file=${JA_HANS_DST_FILE}
+-  DEPENDS uca9dump ${JA_HANS_SRC_FILE}
++  DEPENDS ${UCA9DUMP_DEPENDS} ${JA_HANS_SRC_FILE}
+   )
+ ADD_CUSTOM_TARGET(strings_ja_hans DEPENDS ${JA_HANS_DST_FILE})
+ 
+ ADD_CUSTOM_COMMAND(
+   OUTPUT ${ZH_HANS_DST_FILE}
+-  COMMAND uca9dump zh
++  COMMAND ${UCA9DUMP_COMMAND} zh
+   --in_file=${ZH_HANS_SRC_FILE}
+   --out_file=${ZH_HANS_DST_FILE}
+-  DEPENDS uca9dump ${ZH_HANS_SRC_FILE}
++  DEPENDS ${UCA9DUMP_DEPENDS} ${ZH_HANS_SRC_FILE}
+   )
+ ADD_CUSTOM_TARGET(strings_zh_hans DEPENDS ${ZH_HANS_DST_FILE})
+ 
+diff --git a/utilities/CMakeLists.txt b/utilities/CMakeLists.txt
+index 865abc2..63bf00e 100644
+--- a/utilities/CMakeLists.txt
++++ b/utilities/CMakeLists.txt
+@@ -36,20 +36,38 @@ IF(NOT CMAKE_CROSSCOMPILING)
+     COMPONENT Test
+     LINK_LIBRARIES mysys
+     )
++  SET(COMP_ERR_COMMAND comp_err)
++  SET(COMP_ERR_DEPENDS comp_err)
++ELSEIF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI" AND
++    COMP_ERR_EXECUTABLE)
++  SET(COMP_ERR_COMMAND ${COMP_ERR_EXECUTABLE})
++  SET(COMP_ERR_DEPENDS)
++ELSE()
++  SET(COMP_ERR_COMMAND comp_err)
++  SET(COMP_ERR_DEPENDS)
+ ENDIF()
+ 
+-MYSQL_ADD_EXECUTABLE(comp_client_err
+-  comp_client_err.cc
+-  ${CMAKE_SOURCE_DIR}/libmysql/errmsg.cc
+-  LINK_LIBRARIES mysys
+-  SKIP_INSTALL
+-  )
++IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI" AND
++    COMP_CLIENT_ERR_EXECUTABLE)
++  SET(COMP_CLIENT_ERR_COMMAND ${COMP_CLIENT_ERR_EXECUTABLE})
++  SET(COMP_CLIENT_ERR_DEPENDS)
++ELSE()
++  MYSQL_ADD_EXECUTABLE(comp_client_err
++    comp_client_err.cc
++    ${CMAKE_SOURCE_DIR}/libmysql/errmsg.cc
++    LINK_LIBRARIES mysys
++    SKIP_INSTALL
++    )
++  SET(COMP_CLIENT_ERR_COMMAND comp_client_err)
++  SET(COMP_CLIENT_ERR_DEPENDS comp_client_err)
++ENDIF()
+ 
+ ADD_CUSTOM_COMMAND(OUTPUT ${PROJECT_BINARY_DIR}/include/mysqlclient_ername.h
+-  COMMAND comp_client_err
++  COMMAND ${COMP_CLIENT_ERR_COMMAND}
+   --in_file=${PROJECT_SOURCE_DIR}/include/errmsg.h
+   --out_file=${PROJECT_BINARY_DIR}/include/mysqlclient_ername.h
+-  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/comp_client_err.cc)
++  DEPENDS ${COMP_CLIENT_ERR_DEPENDS}
++  ${CMAKE_CURRENT_SOURCE_DIR}/comp_client_err.cc)
+ 
+ MY_ADD_CUSTOM_TARGET(GenClientError ALL
+   DEPENDS ${PROJECT_BINARY_DIR}/include/mysqlclient_ername.h)
+@@ -75,7 +93,7 @@ ADD_CUSTOM_COMMAND(OUTPUT
+   ${PROJECT_BINARY_DIR}/include/mysqld_ername.h
+   ${PROJECT_BINARY_DIR}/include/mysqld_errmsg.h
+   ${PROJECT_BINARY_DIR}/${INSTALL_MYSQLSHAREDIR}/english/errmsg.sys
+-  COMMAND comp_err
++  COMMAND ${COMP_ERR_COMMAND}
+   --charset=${PROJECT_SOURCE_DIR}/share/charsets
+   --out-dir=${PROJECT_BINARY_DIR}/${INSTALL_MYSQLSHAREDIR}/
+   --header_file=${PROJECT_BINARY_DIR}/include/mysqld_error.h
+@@ -84,6 +102,7 @@ ADD_CUSTOM_COMMAND(OUTPUT
+   --in_file_errlog=${PROJECT_SOURCE_DIR}/share/messages_to_error_log.txt
+   --in_file_toclient=${PROJECT_SOURCE_DIR}/share/messages_to_clients.txt
+   DEPENDS
++  ${COMP_ERR_DEPENDS}
+   ${PROJECT_SOURCE_DIR}/share/messages_to_error_log.txt
+   ${PROJECT_SOURCE_DIR}/share/messages_to_clients.txt
+   ${CMAKE_CURRENT_SOURCE_DIR}/comp_err.cc)
+diff --git a/vio/CMakeLists.txt b/vio/CMakeLists.txt
+index 13f5e42..639cf6d 100644
+--- a/vio/CMakeLists.txt
++++ b/vio/CMakeLists.txt
+@@ -30,6 +30,10 @@ SET(VIO_SOURCES
+   viosslfactories.cc
+ )
+ 
++IF(MYSQL_WASI_PORT_PROBE AND CMAKE_SYSTEM_NAME STREQUAL "WASI")
++  LIST(APPEND VIO_SOURCES mysql_wasi_socket_shim.c)
++ENDIF()
++
+ IF(WIN32)
+   LIST(APPEND VIO_SOURCES
+     viopipe.cc
+diff --git a/vio/viosocket.cc b/vio/viosocket.cc
+index ebbc077..e9fe1e9 100644
+--- a/vio/viosocket.cc
++++ b/vio/viosocket.cc
+@@ -72,6 +72,18 @@
+ 
+ #include "mysql/psi/mysql_socket.h"
+ 
++#if defined(__wasi__)
++#define MYSQL_VIO_FCNTL(...) waasmtime_mysql_fcntl(__VA_ARGS__)
++#define MYSQL_VIO_RECV(...) waasmtime_mysql_recv(__VA_ARGS__)
++#define MYSQL_VIO_POLL(...) waasmtime_mysql_poll(__VA_ARGS__)
++#define MYSQL_VIO_PPOLL(...) waasmtime_mysql_ppoll(__VA_ARGS__)
++#else
++#define MYSQL_VIO_FCNTL(...) fcntl(__VA_ARGS__)
++#define MYSQL_VIO_RECV(...) recv(__VA_ARGS__)
++#define MYSQL_VIO_POLL(...) poll(__VA_ARGS__)
++#define MYSQL_VIO_PPOLL(...) ppoll(__VA_ARGS__)
++#endif
++
+ int vio_errno(Vio *vio [[maybe_unused]]) {
+ /* These transport types are not Winsock based. */
+ #ifdef _WIN32
+@@ -260,8 +272,8 @@ int vio_set_blocking(Vio *vio, bool status) {
+   {
+     int flags;
+ 
+-    if ((flags = fcntl(mysql_socket_getfd(vio->mysql_socket), F_GETFL,
+-                       nullptr)) < 0)
++    if ((flags = MYSQL_VIO_FCNTL(mysql_socket_getfd(vio->mysql_socket),
++                                  F_GETFL, nullptr)) < 0)
+       return -1;
+ 
+     /*
+@@ -275,7 +287,8 @@ int vio_set_blocking(Vio *vio, bool status) {
+     else
+       flags |= O_NONBLOCK;
+ 
+-    if (fcntl(mysql_socket_getfd(vio->mysql_socket), F_SETFL, flags) == -1)
++    if (MYSQL_VIO_FCNTL(mysql_socket_getfd(vio->mysql_socket), F_SETFL,
++                        flags) == -1)
+       return -1;
+   }
+ #endif
+@@ -755,7 +768,7 @@ static bool socket_peek_read(Vio *vio, uint *bytes) {
+   return false;
+ #else
+   char buf[1024];
+-  ssize_t res = recv(sd, &buf, sizeof(buf), MSG_PEEK);
++  ssize_t res = MYSQL_VIO_RECV(sd, &buf, sizeof(buf), MSG_PEEK);
+   if (res < 0) return true;
+   *bytes = res;
+   return false;
+@@ -868,12 +881,13 @@ int vio_io_wait(Vio *vio, enum enum_vio_io_event event, int timeout) {
+       signal_mask is unused for client libraries. A valid value for thread_id
+       is not assigned until there is attempt to shut down the connection.
+     */
+-    ret = ppoll(&pfd, 1, ts_ptr,
+-                !vio->thread_id.has_value() || (vio->thread_id.value() != 0)
+-                    ? &vio->signal_mask
+-                    : nullptr);
++    ret = MYSQL_VIO_PPOLL(&pfd, 1, ts_ptr,
++                          !vio->thread_id.has_value() ||
++                                  (vio->thread_id.value() != 0)
++                              ? &vio->signal_mask
++                              : nullptr);
+ #else
+-    ret = poll(&pfd, 1, timeout);
++    ret = MYSQL_VIO_POLL(&pfd, 1, timeout);
+ #endif
+   } while (ret < 0 && vio_should_retry(vio) &&
+            (retry_count++ < vio->retry_count));
+diff --git a/vio/viossl.cc b/vio/viossl.cc
+index 6655540..b0c5640 100644
+--- a/vio/viossl.cc
++++ b/vio/viossl.cc
+@@ -690,7 +690,17 @@ static int ssl_do(struct st_VioSSLFd *ptr, Vio *vio, long timeout,
+     DBUG_PRINT("info", ("ssl: %p timeout: %ld", ssl, timeout));
+     SSL_clear(ssl);
+     SSL_SESSION_set_timeout(SSL_get_session(ssl), timeout);
++#if defined(__wasi__) && defined(OPENSSL_NO_SOCK)
++    /*
++      The WASI port probe builds OpenSSL with no-sock and routes plain MySQL
++      sockets through custom Wasmtime imports. TLS needs a custom BIO bridge
++      for that socket table; fail cleanly until that bridge exists.
++    */
++    *ssl_errno_holder = 0;
++    return 1;
++#else
+     SSL_set_fd(ssl, sd);
++#endif
+ #if defined(SSL_OP_NO_COMPRESSION)
+     SSL_set_options(ssl, SSL_OP_NO_COMPRESSION); /* OpenSSL >= 1.0 only */
+ #elif OPENSSL_VERSION_NUMBER >= 0x00908000L /* workaround for OpenSSL 0.9.8 */
