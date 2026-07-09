@@ -25,7 +25,7 @@ For building from source:
 Download the latest release asset for your platform:
 
 ```sh
-VERSION=v0.1.2
+VERSION=v0.1.3
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)  ASSET=linux-x86_64 ;;
   Darwin-x86_64) ASSET=macos-x86_64 ;;
@@ -33,7 +33,7 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
-ARCHIVE="waasmtime-mysql-$VERSION-$ASSET.tar.gz"
+ARCHIVE="wasmtime-mysql-$VERSION-$ASSET.tar.gz"
 curl -L -o "$ARCHIVE" \
   "https://github.com/adamziel/wasmtime-mysql/releases/download/$VERSION/$ARCHIVE"
 curl -L -o SHA256SUMS \
@@ -44,13 +44,13 @@ else
   grep "  $ARCHIVE$" SHA256SUMS | shasum -a 256 -c -
 fi
 tar -xzf "$ARCHIVE"
-cd "waasmtime-mysql-$VERSION-$ASSET"
+cd "wasmtime-mysql-$VERSION-$ASSET"
 ```
 
 On macOS, the unsigned binary may need quarantine removed:
 
 ```sh
-xattr -d com.apple.quarantine ./waasmtime-mysql 2>/dev/null || true
+xattr -d com.apple.quarantine ./wasmtime-mysql 2>/dev/null || true
 ```
 
 Create and initialize a datadir:
@@ -59,7 +59,7 @@ Create and initialize a datadir:
 RUN_DIR="$PWD/run"
 mkdir -p "$RUN_DIR/tmp"
 
-./waasmtime-mysql \
+./wasmtime-mysql \
   --no-default-preopen \
   --preopen "$RUN_DIR=/tmp" \
   --env TMPDIR=/tmp/tmp \
@@ -81,7 +81,7 @@ mkdir -p "$RUN_DIR/tmp"
 Start the server on `127.0.0.1:3307`:
 
 ```sh
-./waasmtime-mysql \
+./wasmtime-mysql \
   --no-default-preopen \
   --preopen "$RUN_DIR=/tmp" \
   --env TMPDIR=/tmp/tmp \
@@ -131,7 +131,7 @@ Bundle the resulting `mysqld` WebAssembly module into one native executable:
 The runner is written to:
 
 ```sh
-target/release/waasmtime-mysql
+target/release/wasmtime-mysql
 ```
 
 ## Initialize a datadir
@@ -146,7 +146,7 @@ mkdir -p "$RUN_DIR/tmp"
 Initialize MySQL with an empty local root password:
 
 ```sh
-target/release/waasmtime-mysql \
+target/release/wasmtime-mysql \
   --no-default-preopen \
   --preopen "$RUN_DIR=/tmp" \
   --env TMPDIR=/tmp/tmp \
@@ -170,7 +170,7 @@ target/release/waasmtime-mysql \
 Start MySQL on `127.0.0.1:3307`:
 
 ```sh
-target/release/waasmtime-mysql \
+target/release/wasmtime-mysql \
   --no-default-preopen \
   --preopen "$RUN_DIR=/tmp" \
   --env TMPDIR=/tmp/tmp \
@@ -223,18 +223,18 @@ InnoDB table per client in the `bench` schema, inserts rows in batches, and
 verifies `COUNT(*)` for each table.
 
 ```sh
-python3 scripts/bench-tcp.py --clients 16 --rows 2000 --batch-size 100
-python3 scripts/bench-tcp.py --clients 32 --rows 1000 --batch-size 100
+python3 scripts/bench-tcp.py --clients 1 --rows 2000 --batch-size 100
+python3 scripts/bench-tcp.py --clients 4 --rows 500 --batch-size 100
 ```
 
-Recent numbers from the Linux x86_64 `v0.1.2` release tarball, using the
+Recent numbers from the Linux x86_64 `v0.1.3` release tarball, using the
 commands above on this workspace:
 
 | Clients | Rows/client | Inserted rows | Counted rows | Elapsed | Rows/sec |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 5 | 5 | 5 | 0.006 s | 841 |
-| 16 | 2,000 | 32,000 | 32,000 | 0.190 s | 168,009 |
-| 32 | 1,000 | 32,000 | 32,000 | 0.137 s | 234,282 |
+| 1 | 5 | 5 | 5 | 0.009 s | 581 |
+| 1 | 2,000 | 2,000 | 2,000 | 0.020 s | 101,312 |
+| 4 | 500 | 2,000 | 2,000 | 0.025 s | 81,003 |
 
 The same release binary was also smoke-tested with direct SQL over TCP:
 `SELECT VERSION()`, `CREATE DATABASE`, `CREATE TABLE`, `INSERT`, `COUNT(*)`,
@@ -252,7 +252,8 @@ and row lookup.
   startup logs include a missing `errmsg.sys` warning.
 - MySQL warns that this WASM target was built without its usual memory barrier
   capability. Treat high-concurrency correctness as something that still needs
-  deeper validation.
+  deeper validation; a 16-client benchmark run has trapped in WASM memory during
+  local testing.
 - The build relies on patches under `patches/mysql-wasi/` and generated output
   under `build/`; the generated MySQL source/build trees are intentionally not
   committed.

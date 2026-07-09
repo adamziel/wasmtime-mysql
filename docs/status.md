@@ -8,7 +8,7 @@
 - The stock Docker/WASI probe reaches MySQL's CMake configure step with wasi-sdk, then fails because MySQL requires 64-bit platforms and `wasm32-wasip1-threads` has 32-bit pointers.
 - The static OpenSSL dependency can be built for WASI from OpenSSL `openssl-3.0.21` with `scripts/build-openssl-wasi.sh`.
 - The diagnostic MySQL WASI port probe now links `build/mysql-wasi-port/build/runtime_output_directory/mysqld` as a WebAssembly module.
-- The linked diagnostic `mysqld` module can be embedded into `target/release/waasmtime-mysql` with `scripts/build-single.sh`.
+- The linked diagnostic `mysqld` module can be embedded into `target/release/wasmtime-mysql` with `scripts/build-single.sh`.
 
 The stock probe output is still:
 
@@ -37,7 +37,7 @@ imported shared memory: 128 MiB initial, 1 GiB maximum
 The bundled executable observed in this workspace is:
 
 ```text
-target/release/waasmtime-mysql: ELF 64-bit LSB pie executable, x86-64
+target/release/wasmtime-mysql: ELF 64-bit LSB pie executable, x86-64
 size: 91M
 embedded source: build/mysql-wasi-port/build/runtime_output_directory/mysqld
 ```
@@ -75,7 +75,7 @@ The runner now configures Wasmtime for:
 The basic bundle checks pass:
 
 ```sh
-./target/release/waasmtime-mysql --show-embedded-source
+./target/release/wasmtime-mysql --show-embedded-source
 ```
 
 prints:
@@ -89,7 +89,7 @@ A bounded runtime smoke test succeeds when guest `/tmp` is preopened:
 ```sh
 tmpdir=$(mktemp -d)
 mkdir -p "$tmpdir/tmp" "$tmpdir/data"
-timeout 30s ./target/release/waasmtime-mysql \
+timeout 30s ./target/release/wasmtime-mysql \
   --no-default-preopen \
   --preopen "$tmpdir=/tmp" \
   --env TMPDIR=/tmp/tmp \

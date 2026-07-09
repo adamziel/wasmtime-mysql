@@ -1,6 +1,6 @@
 [package]
-name = "waasmtime-mysql"
-version = "0.1.2"
+name = "wasmtime-mysql"
+version = "0.1.3"
 edition = "2024"
 build = "build.rs"
 

@@ -6,7 +6,7 @@
   (import "waasmtime_mysql_sockets" "close"
     (func $close (param i32) (result i32)))
   (memory (export "memory") 1)
-  (data (i32.const 8) "waasmtime-mysql dev fixture\n")
+  (data (i32.const 8) "wasmtime-mysql dev fixture\n")
   (func $_start (export "_start")
     (local $fd i32)
     (local.set $fd
@@ -18,7 +18,7 @@
       (then
         (drop (call $close (local.get $fd)))))
     (i32.store (i32.const 0) (i32.const 8))
-    (i32.store (i32.const 4) (i32.const 28))
+    (i32.store (i32.const 4) (i32.const 27))
     (drop
       (call $fd_write
         (i32.const 1)

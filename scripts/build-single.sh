@@ -17,4 +17,4 @@ fi
 
 cd "$root"
 MYSQLD_WASM="$wasm" cargo build --release
-ls -lh "$root/target/release/waasmtime-mysql"
+ls -lh "$root/target/release/wasmtime-mysql"
