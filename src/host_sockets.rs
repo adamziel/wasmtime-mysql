@@ -38,6 +38,14 @@ struct HostSocket {
     host_domain: i32,
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct NormalizedSocketType {
+    ty: i32,
+    close_on_exec: bool,
+    nonblocking: bool,
+}
+
 impl HostSockets {
     pub(crate) fn new() -> Self {
         Self {
@@ -104,14 +112,20 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
                 if !caller.data().network_allowed {
                     return neg_errno(libc::ENETDOWN);
                 }
-                let ty = match normalize_socket_type(ty) {
-                    Ok(ty) => ty,
+                let socket_type = match normalize_socket_type(ty) {
+                    Ok(socket_type) => socket_type,
                     Err(errno) => return neg_errno(errno),
                 };
                 let host_domain = normalize_socket_domain(domain);
-                let raw_fd = unsafe { libc::socket(host_domain, ty, protocol) };
+                let raw_fd = unsafe { libc::socket(host_domain, socket_type.ty, protocol) };
                 if raw_fd < 0 {
                     return neg_last_errno();
+                }
+                if let Err(errno) = configure_socket_type_flags(raw_fd, socket_type) {
+                    unsafe {
+                        libc::close(raw_fd);
+                    }
+                    return neg_errno(errno);
                 }
                 caller
                     .data_mut()
@@ -740,26 +754,50 @@ fn checked_poll_count(nfds: i32) -> std::result::Result<usize, i32> {
 }
 
 #[cfg(unix)]
-fn normalize_socket_type(ty: i32) -> std::result::Result<i32, i32> {
-    let flag_mask =
-        libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK | WASI_ALT_SOCK_CLOEXEC | WASI_ALT_SOCK_NONBLOCK;
+fn normalize_socket_type(ty: i32) -> std::result::Result<NormalizedSocketType, i32> {
+    let flag_mask = host_socket_flag_mask() | WASI_ALT_SOCK_CLOEXEC | WASI_ALT_SOCK_NONBLOCK;
     let base = ty & !flag_mask;
     let flags = ty & flag_mask;
 
-    let mut normalized = match base {
+    let ty = match base {
         libc::SOCK_STREAM | WASI_ALT_SOCK_STREAM => libc::SOCK_STREAM,
         libc::SOCK_DGRAM | WASI_ALT_SOCK_DGRAM => libc::SOCK_DGRAM,
         _ => return Err(libc::EOPNOTSUPP),
     };
 
-    if flags & (libc::SOCK_CLOEXEC | WASI_ALT_SOCK_CLOEXEC) != 0 {
-        normalized |= libc::SOCK_CLOEXEC;
-    }
-    if flags & (libc::SOCK_NONBLOCK | WASI_ALT_SOCK_NONBLOCK) != 0 {
-        normalized |= libc::SOCK_NONBLOCK;
+    Ok(NormalizedSocketType {
+        ty,
+        close_on_exec: has_host_sock_cloexec(flags) || flags & WASI_ALT_SOCK_CLOEXEC != 0,
+        nonblocking: has_host_sock_nonblock(flags) || flags & WASI_ALT_SOCK_NONBLOCK != 0,
+    })
+}
+
+#[cfg(unix)]
+fn configure_socket_type_flags(
+    raw_fd: RawFd,
+    socket_type: NormalizedSocketType,
+) -> std::result::Result<(), i32> {
+    if socket_type.close_on_exec {
+        let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(last_errno());
+        }
+        if unsafe { libc::fcntl(raw_fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            return Err(last_errno());
+        }
     }
 
-    Ok(normalized)
+    if socket_type.nonblocking {
+        let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(last_errno());
+        }
+        if unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(last_errno());
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -770,6 +808,36 @@ fn normalize_socket_domain(domain: i32) -> i32 {
         libc::AF_INET6 => libc::AF_INET6,
         _ => domain,
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn host_socket_flag_mask() -> i32 {
+    libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn host_socket_flag_mask() -> i32 {
+    0
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn has_host_sock_cloexec(flags: i32) -> bool {
+    flags & libc::SOCK_CLOEXEC != 0
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn has_host_sock_cloexec(_flags: i32) -> bool {
+    false
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn has_host_sock_nonblock(flags: i32) -> bool {
+    flags & libc::SOCK_NONBLOCK != 0
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn has_host_sock_nonblock(_flags: i32) -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -884,11 +952,14 @@ fn cvt_ssize(rc: libc::ssize_t) -> i32 {
 
 #[cfg(unix)]
 fn neg_last_errno() -> i32 {
-    neg_errno(
-        std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(libc::EIO),
-    )
+    neg_errno(last_errno())
+}
+
+#[cfg(unix)]
+fn last_errno() -> i32 {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO)
 }
 
 fn neg_errno(errno: i32) -> i32 {

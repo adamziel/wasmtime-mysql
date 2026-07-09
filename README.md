@@ -25,7 +25,7 @@ For building from source:
 Download the latest release asset for your platform:
 
 ```sh
-VERSION=v0.1.0
+VERSION=v0.1.1
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)  ASSET=linux-x86_64 ;;
   Darwin-x86_64) ASSET=macos-x86_64 ;;
