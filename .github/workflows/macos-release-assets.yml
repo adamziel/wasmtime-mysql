@@ -1,0 +1,68 @@
+name: macOS release assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset_suffix }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_suffix: macos-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset_suffix: macos-aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Download MySQL wasm release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release-input
+          gh release download "${{ inputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "mysqld-wasm-${{ inputs.tag }}.tar.gz" \
+            --dir release-input
+          tar -xzf "release-input/mysqld-wasm-${{ inputs.tag }}.tar.gz" -C release-input
+
+      - name: Build native runner
+        run: |
+          rustup target add "${{ matrix.target }}"
+          MYSQLD_WASM="$PWD/release-input/mysqld" \
+            cargo build --release --target "${{ matrix.target }}"
+
+      - name: Package
+        run: |
+          name="waasmtime-mysql-${{ inputs.tag }}-${{ matrix.asset_suffix }}"
+          mkdir -p "dist/$name/scripts"
+          cp "target/${{ matrix.target }}/release/waasmtime-mysql" "dist/$name/"
+          cp README.md "dist/$name/"
+          cp scripts/bench-tcp.py "dist/$name/scripts/"
+          chmod +x "dist/$name/waasmtime-mysql" "dist/$name/scripts/bench-tcp.py"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ inputs.tag }}" \
+            "dist/waasmtime-mysql-${{ inputs.tag }}-${{ matrix.asset_suffix }}.tar.gz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

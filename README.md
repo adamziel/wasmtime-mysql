@@ -9,10 +9,101 @@ tables, and insert/query rows.
 
 ## Requirements
 
+For the release binaries:
+
+- Linux x86_64, macOS Intel, or macOS Apple Silicon
+- Python 3, only if you want to run the included benchmark client
+- Optional: a local `mysql` CLI for manual connections
+
+For building from source:
+
 - Rust toolchain
 - Docker, for the WASI SDK build scripts
-- Python 3, for the included benchmark client
-- Optional: a local `mysql` CLI for manual connections
+
+## Quick start from a release
+
+Download the latest release asset for your platform:
+
+```sh
+VERSION=v0.1.0
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)  ASSET=linux-x86_64 ;;
+  Darwin-x86_64) ASSET=macos-x86_64 ;;
+  Darwin-arm64)  ASSET=macos-aarch64 ;;
+  *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
+
+curl -L -o "waasmtime-mysql-$VERSION-$ASSET.tar.gz" \
+  "https://github.com/adamziel/wasmtime-mysql/releases/download/$VERSION/waasmtime-mysql-$VERSION-$ASSET.tar.gz"
+tar -xzf "waasmtime-mysql-$VERSION-$ASSET.tar.gz"
+cd "waasmtime-mysql-$VERSION-$ASSET"
+```
+
+On macOS, the unsigned binary may need quarantine removed:
+
+```sh
+xattr -d com.apple.quarantine ./waasmtime-mysql 2>/dev/null || true
+```
+
+Create and initialize a datadir:
+
+```sh
+RUN_DIR="$PWD/run"
+mkdir -p "$RUN_DIR/tmp"
+
+./waasmtime-mysql \
+  --no-default-preopen \
+  --preopen "$RUN_DIR=/tmp" \
+  --env TMPDIR=/tmp/tmp \
+  --env HOME=/tmp \
+  -- \
+  --no-defaults \
+  --initialize-insecure \
+  --skip-networking \
+  --console \
+  --datadir=/tmp/data \
+  --tmpdir=/tmp/tmp \
+  --log-error=/tmp/mysqld-init.err \
+  --log-error-verbosity=3 \
+  --auto-generate-certs=OFF \
+  --sha256-password-auto-generate-rsa-keys=OFF \
+  --caching-sha2-password-auto-generate-rsa-keys=OFF
+```
+
+Start the server on `127.0.0.1:3307`:
+
+```sh
+./waasmtime-mysql \
+  --no-default-preopen \
+  --preopen "$RUN_DIR=/tmp" \
+  --env TMPDIR=/tmp/tmp \
+  --env HOME=/tmp \
+  -- \
+  --no-defaults \
+  --console \
+  --datadir=/tmp/data \
+  --tmpdir=/tmp/tmp \
+  --log-error=/tmp/mysqld-runtime.err \
+  --log-error-verbosity=3 \
+  --port=3307 \
+  --bind-address=127.0.0.1 \
+  --skip-log-bin \
+  --auto-generate-certs=OFF \
+  --sha256-password-auto-generate-rsa-keys=OFF \
+  --caching-sha2-password-auto-generate-rsa-keys=OFF
+```
+
+Connect from another terminal:
+
+```sh
+mysql --protocol=TCP -h127.0.0.1 -P3307 -uroot --ssl-mode=DISABLED
+```
+
+Or run the included dependency-free benchmark/connectivity client:
+
+```sh
+python3 scripts/bench-tcp.py --clients 1 --rows 5 --batch-size 5
+```
 
 ## Build
 
