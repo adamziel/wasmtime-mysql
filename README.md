@@ -25,7 +25,7 @@ For building from source:
 Download the latest release asset for your platform:
 
 ```sh
-VERSION=v0.1.1
+VERSION=v0.1.2
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)  ASSET=linux-x86_64 ;;
   Darwin-x86_64) ASSET=macos-x86_64 ;;
@@ -33,9 +33,17 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
-curl -L -o "waasmtime-mysql-$VERSION-$ASSET.tar.gz" \
-  "https://github.com/adamziel/wasmtime-mysql/releases/download/$VERSION/waasmtime-mysql-$VERSION-$ASSET.tar.gz"
-tar -xzf "waasmtime-mysql-$VERSION-$ASSET.tar.gz"
+ARCHIVE="waasmtime-mysql-$VERSION-$ASSET.tar.gz"
+curl -L -o "$ARCHIVE" \
+  "https://github.com/adamziel/wasmtime-mysql/releases/download/$VERSION/$ARCHIVE"
+curl -L -o SHA256SUMS \
+  "https://github.com/adamziel/wasmtime-mysql/releases/download/$VERSION/SHA256SUMS"
+if command -v sha256sum >/dev/null 2>&1; then
+  grep "  $ARCHIVE$" SHA256SUMS | sha256sum -c -
+else
+  grep "  $ARCHIVE$" SHA256SUMS | shasum -a 256 -c -
+fi
+tar -xzf "$ARCHIVE"
 cd "waasmtime-mysql-$VERSION-$ASSET"
 ```
 
@@ -219,15 +227,18 @@ python3 scripts/bench-tcp.py --clients 16 --rows 2000 --batch-size 100
 python3 scripts/bench-tcp.py --clients 32 --rows 1000 --batch-size 100
 ```
 
-Recent numbers from this workspace, after the TCP/socket and thread-exit fixes:
+Recent numbers from the Linux x86_64 `v0.1.2` release tarball, using the
+commands above on this workspace:
 
 | Clients | Rows/client | Inserted rows | Counted rows | Elapsed | Rows/sec |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | 2,000 | 32,000 | 32,000 | 1.099 s | 29,113 |
-| 32 | 1,000 | 32,000 | 32,000 | 1.048 s | 30,521 |
+| 1 | 5 | 5 | 5 | 0.006 s | 841 |
+| 16 | 2,000 | 32,000 | 32,000 | 0.190 s | 168,009 |
+| 32 | 1,000 | 32,000 | 32,000 | 0.137 s | 234,282 |
 
-The 32-client run was also validated afterward with `32` tables and `32,000`
-rows visible in the live MySQL schema.
+The same release binary was also smoke-tested with direct SQL over TCP:
+`SELECT VERSION()`, `CREATE DATABASE`, `CREATE TABLE`, `INSERT`, `COUNT(*)`,
+and row lookup.
 
 ## Limitations
 
