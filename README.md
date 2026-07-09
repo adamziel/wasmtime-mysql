@@ -25,26 +25,8 @@ For building from source:
 Download the latest release asset for your platform:
 
 ```sh
-VERSION=v0.1.3
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64)  ASSET=linux-x86_64 ;;
-  Darwin-x86_64) ASSET=macos-x86_64 ;;
-  Darwin-arm64)  ASSET=macos-aarch64 ;;
-  *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
-esac
-
-ARCHIVE="wasmtime-mysql-$VERSION-$ASSET.tar.gz"
-curl -L -o "$ARCHIVE" \
-  "https://github.com/adamziel/wasmtime-mysql/releases/download/$VERSION/$ARCHIVE"
-curl -L -o SHA256SUMS \
-  "https://github.com/adamziel/wasmtime-mysql/releases/download/$VERSION/SHA256SUMS"
-if command -v sha256sum >/dev/null 2>&1; then
-  grep "  $ARCHIVE$" SHA256SUMS | sha256sum -c -
-else
-  grep "  $ARCHIVE$" SHA256SUMS | shasum -a 256 -c -
-fi
-tar -xzf "$ARCHIVE"
-cd "wasmtime-mysql-$VERSION-$ASSET"
+curl -fsSL https://raw.githubusercontent.com/adamziel/wasmtime-mysql/main/scripts/install-release.sh | sh
+cd wasmtime-mysql-v0.1.3-*
 ```
 
 On macOS, the unsigned binary may need quarantine removed:
