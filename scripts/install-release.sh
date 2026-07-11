@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-VERSION="${VERSION:-v0.1.4}"
+VERSION="${VERSION:-v0.1.5}"
 REPO="${REPO:-adamziel/wasmtime-mysql}"
 BASE_URL="https://github.com/$REPO/releases/download/$VERSION"
 

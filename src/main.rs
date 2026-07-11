@@ -14,6 +14,7 @@ use wasmtime::{
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
+mod guest_errno;
 mod host_files;
 mod host_sockets;
 
@@ -364,7 +365,7 @@ fn define_wasi_thread_spawn(linker: &mut Linker<AppState>, runtime: Arc<RuntimeE
 fn spawn_wasi_thread(runtime: Arc<RuntimeEnv>, start_arg: i32) -> i32 {
     let thread_id = runtime.next_thread_id.fetch_add(1, Ordering::Relaxed);
     if thread_id <= 0 {
-        return -libc::EAGAIN;
+        return -guest_errno::EAGAIN;
     }
 
     match thread::Builder::new()
@@ -378,7 +379,7 @@ fn spawn_wasi_thread(runtime: Arc<RuntimeEnv>, start_arg: i32) -> i32 {
             }
         }) {
         Ok(_) => thread_id,
-        Err(_) => -libc::EAGAIN,
+        Err(_) => -guest_errno::EAGAIN,
     }
 }
 

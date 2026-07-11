@@ -4,10 +4,18 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(windows)]
+use windows_sys::Win32::Networking::WinSock::SOCKET;
 
 use wasmtime::{Caller, Linker, Result};
 
-use crate::AppState;
+use crate::{AppState, guest_errno as errno};
+
+#[cfg(windows)]
+#[path = "host_sockets_windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub(crate) use windows::add_to_linker;
 
 const MODULE_NAME: &str = "waasmtime_mysql_sockets";
 const GUEST_FD_BASE: i32 = 10_000;
@@ -26,7 +34,7 @@ pub(crate) struct HostSockets {
 
 struct HostSocketsInner {
     next_fd: i32,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     sockets: HashMap<i32, HostSocket>,
 }
 
@@ -36,6 +44,15 @@ struct HostSocket {
     raw_fd: RawFd,
     guest_domain: i32,
     host_domain: i32,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct HostSocket {
+    raw_socket: SOCKET,
+    guest_domain: i32,
+    host_domain: i32,
+    status_flags: i32,
 }
 
 #[cfg(unix)]
@@ -51,7 +68,7 @@ impl HostSockets {
         Self {
             inner: Arc::new(Mutex::new(HostSocketsInner {
                 next_fd: GUEST_FD_BASE,
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 sockets: HashMap::new(),
             })),
         }
@@ -76,13 +93,56 @@ impl HostSockets {
     #[cfg(unix)]
     fn get(&self, guest_fd: i32) -> std::result::Result<HostSocket, i32> {
         let inner = self.inner.lock().unwrap();
-        inner.sockets.get(&guest_fd).copied().ok_or(libc::EBADF)
+        inner.sockets.get(&guest_fd).copied().ok_or(errno::EBADF)
     }
 
     #[cfg(unix)]
     fn remove(&self, guest_fd: i32) -> std::result::Result<HostSocket, i32> {
         let mut inner = self.inner.lock().unwrap();
-        inner.sockets.remove(&guest_fd).ok_or(libc::EBADF)
+        inner.sockets.remove(&guest_fd).ok_or(errno::EBADF)
+    }
+
+    #[cfg(windows)]
+    fn insert(
+        &self,
+        raw_socket: SOCKET,
+        guest_domain: i32,
+        host_domain: i32,
+        status_flags: i32,
+    ) -> i32 {
+        let mut inner = self.inner.lock().unwrap();
+        let guest_fd = inner.next_fd;
+        inner.next_fd = inner.next_fd.saturating_add(1);
+        inner.sockets.insert(
+            guest_fd,
+            HostSocket {
+                raw_socket,
+                guest_domain,
+                host_domain,
+                status_flags,
+            },
+        );
+        guest_fd
+    }
+
+    #[cfg(windows)]
+    fn get(&self, guest_fd: i32) -> std::result::Result<HostSocket, i32> {
+        let inner = self.inner.lock().unwrap();
+        inner.sockets.get(&guest_fd).copied().ok_or(errno::EBADF)
+    }
+
+    #[cfg(windows)]
+    fn remove(&self, guest_fd: i32) -> std::result::Result<HostSocket, i32> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.sockets.remove(&guest_fd).ok_or(errno::EBADF)
+    }
+
+    #[cfg(windows)]
+    fn set_status_flags(&self, guest_fd: i32, status_flags: i32) -> std::result::Result<(), i32> {
+        let mut inner = self.inner.lock().unwrap();
+        let socket = inner.sockets.get_mut(&guest_fd).ok_or(errno::EBADF)?;
+        socket.status_flags = status_flags;
+        Ok(())
     }
 }
 
@@ -97,11 +157,23 @@ impl Drop for HostSocketsInner {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+impl Drop for HostSocketsInner {
+    fn drop(&mut self) {
+        for (_, socket) in self.sockets.drain() {
+            unsafe {
+                windows_sys::Win32::Networking::WinSock::closesocket(socket.raw_socket);
+            }
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 impl Drop for HostSocketsInner {
     fn drop(&mut self) {}
 }
 
+#[cfg(not(windows))]
 pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
     linker.func_wrap(
         MODULE_NAME,
@@ -110,7 +182,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(unix)]
             {
                 if !caller.data().network_allowed {
-                    return neg_errno(libc::ENETDOWN);
+                    return neg_errno(errno::ENETDOWN);
                 }
                 let socket_type = match normalize_socket_type(ty) {
                     Ok(socket_type) => socket_type,
@@ -135,7 +207,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, domain, ty, protocol);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -166,7 +238,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fd, addr_ptr, addr_len);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -186,7 +258,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (caller, fd, backlog);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -223,7 +295,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
                     }
                     return neg_errno(errno);
                 }
-                if let Err(errno) = write_u32(&mut caller, addr_len_ptr, addr_len) {
+                if let Err(errno) = write_u32(&mut caller, addr_len_ptr, addr_len as u32) {
                     unsafe {
                         libc::close(accepted);
                     }
@@ -237,7 +309,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fd, addr_ptr, addr_len_ptr);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -268,7 +340,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fd, addr_ptr, addr_len);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -322,7 +394,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fd, level, optname, optval_ptr, optlen);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -364,7 +436,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
                 {
                     return neg_errno(errno);
                 }
-                match write_u32(&mut caller, optlen_ptr, optlen) {
+                match write_u32(&mut caller, optlen_ptr, optlen as u32) {
                     Ok(()) => 0,
                     Err(errno) => neg_errno(errno),
                 }
@@ -372,7 +444,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fd, level, optname, optval_ptr, optlen_ptr);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -403,7 +475,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fd, buf_ptr, len, flags);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -443,7 +515,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fd, buf_ptr, len, flags);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -488,7 +560,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fd, buf_ptr, len, flags, addr_ptr, addr_len);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -541,7 +613,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
                 if let Err(errno) = write_guest(&mut caller, addr_ptr, &addr[..addr_len as usize]) {
                     return neg_errno(errno);
                 }
-                match write_u32(&mut caller, addr_len_ptr, addr_len) {
+                match write_u32(&mut caller, addr_len_ptr, addr_len as u32) {
                     Ok(()) => rc as i32,
                     Err(errno) => neg_errno(errno),
                 }
@@ -549,7 +621,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fd, buf_ptr, len, flags, addr_ptr, addr_len_ptr);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -569,7 +641,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (caller, fd, how);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -589,7 +661,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fd);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -609,7 +681,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (caller, fd, cmd, arg);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -663,7 +735,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = (&mut caller, fds_ptr, nfds, timeout);
-                neg_errno(libc::ENOSYS)
+                neg_errno(errno::ENOSYS)
             }
         },
     )?;
@@ -715,7 +787,7 @@ fn sock_name(
         if let Err(errno) = write_guest(&mut caller, addr_ptr, &addr[..addr_len as usize]) {
             return neg_errno(errno);
         }
-        match write_u32(&mut caller, addr_len_ptr, addr_len) {
+        match write_u32(&mut caller, addr_len_ptr, addr_len as u32) {
             Ok(()) => 0,
             Err(errno) => neg_errno(errno),
         }
@@ -723,32 +795,32 @@ fn sock_name(
     #[cfg(not(unix))]
     {
         let _ = (&mut caller, fd, addr_ptr, addr_len_ptr, kind);
-        neg_errno(libc::ENOSYS)
+        neg_errno(errno::ENOSYS)
     }
 }
 
 fn checked_range(ptr: i32, len: i32, memory_len: usize) -> std::result::Result<Range<usize>, i32> {
-    let ptr = usize::try_from(ptr).map_err(|_| libc::EFAULT)?;
+    let ptr = usize::try_from(ptr).map_err(|_| errno::EFAULT)?;
     let len = checked_len(len)?;
-    let end = ptr.checked_add(len).ok_or(libc::EFAULT)?;
+    let end = ptr.checked_add(len).ok_or(errno::EFAULT)?;
     if end > memory_len {
-        return Err(libc::EFAULT);
+        return Err(errno::EFAULT);
     }
     Ok(ptr..end)
 }
 
 fn checked_len(len: i32) -> std::result::Result<usize, i32> {
-    let len = usize::try_from(len).map_err(|_| libc::EINVAL)?;
+    let len = usize::try_from(len).map_err(|_| errno::EINVAL)?;
     if len > MAX_IO_LEN {
-        return Err(libc::EINVAL);
+        return Err(errno::EINVAL);
     }
     Ok(len)
 }
 
 fn checked_poll_count(nfds: i32) -> std::result::Result<usize, i32> {
-    let nfds = usize::try_from(nfds).map_err(|_| libc::EINVAL)?;
+    let nfds = usize::try_from(nfds).map_err(|_| errno::EINVAL)?;
     if nfds > MAX_POLL_FDS {
-        return Err(libc::EINVAL);
+        return Err(errno::EINVAL);
     }
     Ok(nfds)
 }
@@ -762,7 +834,7 @@ fn normalize_socket_type(ty: i32) -> std::result::Result<NormalizedSocketType, i
     let ty = match base {
         libc::SOCK_STREAM | WASI_ALT_SOCK_STREAM => libc::SOCK_STREAM,
         libc::SOCK_DGRAM | WASI_ALT_SOCK_DGRAM => libc::SOCK_DGRAM,
-        _ => return Err(libc::EOPNOTSUPP),
+        _ => return Err(errno::EOPNOTSUPP),
     };
 
     Ok(NormalizedSocketType {
@@ -866,7 +938,7 @@ fn read_guest(
     ptr: i32,
     len: i32,
 ) -> std::result::Result<Vec<u8>, i32> {
-    let export = caller.get_export("memory").ok_or(libc::EFAULT)?;
+    let export = caller.get_export("memory").ok_or(errno::EFAULT)?;
 
     if let Some(mem) = export.clone().into_memory() {
         let data = mem.data(&mut *caller);
@@ -884,7 +956,7 @@ fn read_guest(
         return Ok(bytes);
     }
 
-    Err(libc::EFAULT)
+    Err(errno::EFAULT)
 }
 
 fn write_guest(
@@ -892,13 +964,13 @@ fn write_guest(
     ptr: i32,
     bytes: &[u8],
 ) -> std::result::Result<(), i32> {
-    let export = caller.get_export("memory").ok_or(libc::EFAULT)?;
+    let export = caller.get_export("memory").ok_or(errno::EFAULT)?;
 
     if let Some(mem) = export.clone().into_memory() {
         let data = mem.data_mut(&mut *caller);
         let range = checked_range(
             ptr,
-            i32::try_from(bytes.len()).map_err(|_| libc::EINVAL)?,
+            i32::try_from(bytes.len()).map_err(|_| errno::EINVAL)?,
             data.len(),
         )?;
         data[range].copy_from_slice(bytes);
@@ -909,7 +981,7 @@ fn write_guest(
         let data = mem.data();
         let range = checked_range(
             ptr,
-            i32::try_from(bytes.len()).map_err(|_| libc::EINVAL)?,
+            i32::try_from(bytes.len()).map_err(|_| errno::EINVAL)?,
             data.len(),
         )?;
         for (cell, byte) in data[range].iter().zip(bytes) {
@@ -920,7 +992,7 @@ fn write_guest(
         return Ok(());
     }
 
-    Err(libc::EFAULT)
+    Err(errno::EFAULT)
 }
 
 fn read_u32(caller: &mut Caller<'_, AppState>, ptr: i32) -> std::result::Result<u32, i32> {
@@ -931,9 +1003,8 @@ fn read_u32(caller: &mut Caller<'_, AppState>, ptr: i32) -> std::result::Result<
 fn write_u32(
     caller: &mut Caller<'_, AppState>,
     ptr: i32,
-    value: libc::socklen_t,
+    value: u32,
 ) -> std::result::Result<(), i32> {
-    let value = u32::try_from(value).map_err(|_| libc::EINVAL)?;
     write_guest(caller, ptr, &value.to_le_bytes())
 }
 
@@ -947,7 +1018,7 @@ fn cvt_ssize(rc: libc::ssize_t) -> i32 {
     if rc < 0 {
         return neg_last_errno();
     }
-    i32::try_from(rc).unwrap_or_else(|_| neg_errno(libc::EOVERFLOW))
+    i32::try_from(rc).unwrap_or_else(|_| neg_errno(errno::EOVERFLOW))
 }
 
 #[cfg(unix)]
@@ -957,9 +1028,10 @@ fn neg_last_errno() -> i32 {
 
 #[cfg(unix)]
 fn last_errno() -> i32 {
-    std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(libc::EIO)
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(code) => errno::from_host_errno(code),
+        None => errno::EIO,
+    }
 }
 
 fn neg_errno(errno: i32) -> i32 {

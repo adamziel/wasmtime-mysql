@@ -1,6 +1,6 @@
 [package]
 name = "wasmtime-mysql"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 build = "build.rs"
 
@@ -10,6 +10,15 @@ libc = "0.2"
 signal-hook = "0.3"
 wasmtime = "46.0.1"
 wasmtime-wasi = { version = "46.0.1", default-features = false, features = ["p1"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinSock",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+] }
 
 [build-dependencies]
 wat = "1.0"

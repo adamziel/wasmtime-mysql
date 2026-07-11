@@ -11,7 +11,7 @@ tables, and insert/query rows.
 
 For the release binaries:
 
-- Linux x86_64, macOS Intel, or macOS Apple Silicon
+- Linux x86_64, Windows x86_64 or ARM64, macOS Intel, or macOS Apple Silicon
 - Python 3, only if you want to run the included benchmark client
 - Optional: a local `mysql` CLI for manual connections
 
@@ -22,11 +22,13 @@ For building from source:
 
 ## Quick start from a release
 
+### Linux and macOS
+
 Download the latest release asset for your platform:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adamziel/wasmtime-mysql/main/scripts/install-release.sh | sh
-cd wasmtime-mysql-v0.1.4-*
+cd wasmtime-mysql-v0.1.5-*
 ```
 
 On macOS, the unsigned binary may need quarantine removed:
@@ -34,6 +36,29 @@ On macOS, the unsigned binary may need quarantine removed:
 ```sh
 xattr -d com.apple.quarantine ./wasmtime-mysql 2>/dev/null || true
 ```
+
+### Windows
+
+In PowerShell, the installer detects Intel versus ARM64, verifies the release
+checksum, and prints the directory it extracted:
+
+```powershell
+Invoke-RestMethod https://raw.githubusercontent.com/adamziel/wasmtime-mysql/main/scripts/install-release.ps1 | Invoke-Expression
+cd .\wasmtime-mysql-v0.1.5-windows-aarch64
+.\scripts\run-server.ps1 -Port 3307
+```
+
+Use `windows-x86_64` instead of `windows-aarch64` on an Intel or AMD machine.
+The launcher initializes `run\data` once, then starts MySQL on `127.0.0.1`.
+
+Connect from a second PowerShell window:
+
+```powershell
+mysql.exe --protocol=TCP -h127.0.0.1 -P3307 -uroot --ssl-mode=DISABLED
+```
+
+The remaining manual commands use POSIX shell syntax and apply to Linux and
+macOS.
 
 Create and initialize a datadir:
 
@@ -182,6 +207,9 @@ runner stops the listener, lets MySQL drain connections, and lets InnoDB flush
 before the process exits. A second `Ctrl+C` exits immediately and is not a
 clean shutdown.
 
+On Windows, use SQL `SHUTDOWN` for a clean stop. Console `Ctrl+C` terminates
+the process but does not yet enter the Unix-style graceful shutdown path.
+
 An SQL shutdown uses the same path:
 
 ```sh
@@ -256,9 +284,12 @@ rows/sec is not a proxy for small-query or commit-heavy WordPress work.
 - The error message file is not packaged into the guest filesystem yet, so
   startup logs include a missing `errmsg.sys` warning.
 - The host forwards InnoDB file syncs, parent-directory syncs, and nonblocking
-  exclusive data-file locks to the native filesystem. Clean shutdown, restart,
-  and duplicate-datadir rejection are tested. Power-loss fault injection and
-  every DDL crash window are not.
+  exclusive data-file locks to the native filesystem. Unix uses POSIX APIs;
+  Windows uses `FlushFileBuffers` and `LockFileEx`. Clean shutdown, restart,
+  and duplicate-datadir rejection are tested on Unix. The Windows release
+  workflow initializes InnoDB and runs TCP DDL/insert smoke coverage, but does
+  not yet run the full lifecycle/durability regression there. Power-loss fault
+  injection and every DDL crash window are not covered on any platform.
 - MySQL warns that this WASM target was built without its usual memory-barrier
   capability. Wasm threads and MySQL mutexes do execute against shared memory,
   so concurrent workload tests exercise real locking. That does not prove that
@@ -307,9 +338,15 @@ narrow host imports: TCP sockets, positional file I/O, file sync, directory
 sync, and advisory file locks. Paths are restricted to runner preopens; the
 documented command maps one host run directory to guest `/tmp`.
 
+The Windows runner is a native MSVC executable, not a Linux compatibility
+layer. Its host imports use WinSock, Windows positional file APIs,
+`FlushFileBuffers`, and `LockFileEx`, while preserving the guest's POSIX-like
+socket and errno ABI at the import boundary.
+
 MySQL's normal Unix signal thread cannot work in this environment. Instead,
-the runner owns one shared shutdown flag. SQL `SHUTDOWN`, `Ctrl+C`, and
-`SIGTERM` set that flag; the listener polls at 100 ms, returns to MySQL's main
-thread, and the main thread performs the normal connection and InnoDB cleanup.
-That split is intentional: guest-created signal threads and joins are not a
-reliable lifecycle mechanism here.
+the runner owns one shared shutdown flag. On Unix, SQL `SHUTDOWN`, `Ctrl+C`,
+and `SIGTERM` set that flag; the listener polls at 100 ms, returns to MySQL's
+main thread, and the main thread performs the normal connection and InnoDB
+cleanup. On Windows, SQL `SHUTDOWN` uses the same guest flag while console
+control handling remains incomplete. That split is intentional: guest-created
+signal threads and joins are not a reliable lifecycle mechanism here.

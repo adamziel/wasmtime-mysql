@@ -1,0 +1,78 @@
+name: Windows release assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.1.5
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset_suffix }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            asset_suffix: windows-x86_64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset_suffix: windows-aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Rust target
+        shell: pwsh
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Download MySQL wasm release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path release-input | Out-Null
+          gh release download "${{ inputs.tag }}" --repo "$env:GITHUB_REPOSITORY" --pattern "mysqld-wasm-${{ inputs.tag }}.tar.gz" --dir release-input
+          tar -xzf "release-input/mysqld-wasm-${{ inputs.tag }}.tar.gz" -C release-input
+
+      - name: Verify the Windows host with the development fixture
+        shell: pwsh
+        run: cargo test --features dev-fixture --target "${{ matrix.target }}"
+
+      - name: Build native runner
+        shell: pwsh
+        run: |
+          $env:MYSQLD_WASM = "$PWD/release-input/mysqld"
+          cargo build --release --target "${{ matrix.target }}"
+
+      - name: Initialize InnoDB and exercise TCP SQL
+        shell: pwsh
+        run: |
+          & ./scripts/test-windows-smoke.ps1 -Runner "$PWD/target/${{ matrix.target }}/release/wasmtime-mysql.exe"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "wasmtime-mysql-${{ inputs.tag }}-${{ matrix.asset_suffix }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name/scripts" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/wasmtime-mysql.exe" "dist/$name/"
+          Copy-Item README.md "dist/$name/"
+          Copy-Item scripts/bench-tcp.py "dist/$name/scripts/"
+          Copy-Item scripts/run-server.ps1 "dist/$name/scripts/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip" -Force
+
+      - name: Upload release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ inputs.tag }}" "dist/wasmtime-mysql-${{ inputs.tag }}-${{ matrix.asset_suffix }}.zip" --repo "$env:GITHUB_REPOSITORY" --clobber

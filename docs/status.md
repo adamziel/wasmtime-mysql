@@ -4,12 +4,18 @@
 
 - The port builds MySQL `8.4.10` (`6adc159923b7b6abbe649949551ec25264c2daf9`)
   as a WASI threads module and embeds it in a native Wasmtime runner.
+- Release automation builds native Windows x86_64 and ARM64 runners in
+  addition to the existing Linux and macOS binaries. The repository provides a
+  PowerShell installer and Windows packages include a PowerShell launcher.
 - A server can initialize a fresh datadir, listen on TCP, accept concurrent
   clients, create InnoDB tables, and run normal SQL.
 - InnoDB file writes use native host positional I/O and `sync_data` or
-  `sync_all`; directory metadata sync uses a host directory `fsync`.
-- The host uses POSIX nonblocking record locks for InnoDB data files. A second
-  runner using the same datadir fails to lock `ibdata1` instead of starting.
+  `sync_all`; directory metadata sync uses a host directory `fsync` on Unix
+  and `FlushFileBuffers` on Windows.
+- The host uses POSIX nonblocking record locks on Unix and `LockFileEx` on
+  Windows for InnoDB data files. The Unix lifecycle regression confirms that a
+  second runner using the same datadir fails to lock `ibdata1` instead of
+  starting.
 - SQL `SHUTDOWN`, `SIGINT`, and `SIGTERM` take a graceful path. The lifecycle
   regression verifies server exit, row durability across restart, and no
   crash-recovery message after a clean stop.
@@ -31,6 +37,11 @@ linear memory. The host also supplies narrow imports for sockets, file I/O,
 file synchronization, directory synchronization, data-file locking, and the
 shutdown control flag.
 
+The guest ABI is WASI, not the platform C runtime. Host filesystem and socket
+errors are translated to wasi-libc errno values before being returned to MySQL.
+On Windows the socket bridge uses WinSock and translates guest socket families,
+options, polling events, and nonblocking mode at that boundary.
+
 The guest signal thread is intentionally bypassed. MySQL's normal Unix design
 uses signals and a joinable signal-handler thread; that is not reliable through
 the current WASI thread ABI. The host flag wakes the TCP listener within 100 ms
@@ -51,3 +62,6 @@ shutdown work.
 - This has not had power-loss fault injection, a complete upstream MTR run, or
   long-duration high-contention validation. Treat crash recovery and unusual
   lifecycle failures as areas that still need deliberate testing.
+- The release workflow smoke-tests Windows initialization and TCP DDL/insert
+  behavior. The full signal, durability, and duplicate-datadir lifecycle test
+  currently runs only on Unix.
