@@ -15,6 +15,7 @@ const GUEST_AF_INET: i32 = 2;
 const GUEST_AF_INET6: i32 = 10;
 const GUEST_F_GETFL: i32 = 3;
 const GUEST_F_SETFL: i32 = 4;
+const GUEST_O_NONBLOCK: i32 = 0x0004;
 const GUEST_POLLIN: i16 = 0x0001;
 const GUEST_POLLPRI: i16 = 0x0002;
 const GUEST_POLLOUT: i16 = 0x0004;
@@ -66,7 +67,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
                     }
                     return neg_last_socket_errno();
                 }
-                WASI_ALT_SOCK_NONBLOCK
+                GUEST_O_NONBLOCK
             } else {
                 0
             };
@@ -283,7 +284,8 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             let mut result = optval[..optlen as usize].to_vec();
             if timeout {
                 result = windows_timeout_to_guest(&result, requested_len);
-            } else if level == 1 && optname == GUEST_SO_ERROR && result.len() == 4 {
+            } else if is_guest_socket_level(level) && optname == GUEST_SO_ERROR && result.len() == 4
+            {
                 let error = i32::from_ne_bytes(result[..4].try_into().unwrap());
                 result.copy_from_slice(&socket_errno(error).to_ne_bytes());
             }
@@ -483,13 +485,14 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
             match cmd {
                 GUEST_F_GETFL => socket.status_flags,
                 GUEST_F_SETFL => {
-                    let mut enabled = u32::from(arg != 0);
+                    let status_flags = arg & GUEST_O_NONBLOCK;
+                    let mut enabled = u32::from(status_flags != 0);
                     if unsafe { ws::ioctlsocket(socket.raw_socket, ws::FIONBIO, &mut enabled) }
                         == ws::SOCKET_ERROR
                     {
                         return neg_last_socket_errno();
                     }
-                    match caller.data().sockets.set_status_flags(fd, arg) {
+                    match caller.data().sockets.set_status_flags(fd, status_flags) {
                         Ok(()) => 0,
                         Err(errno) => neg_errno(errno),
                     }
@@ -669,7 +672,7 @@ fn write_sockaddr_family(addr: &mut [u8], family: i32) {
 
 fn normalize_socket_option(level: i32, optname: i32) -> (i32, i32) {
     match level {
-        1 => {
+        level if is_guest_socket_level(level) => {
             let optname = match optname {
                 GUEST_SO_REUSEADDR => ws::SO_REUSEADDR,
                 GUEST_SO_ERROR => ws::SO_ERROR,
@@ -701,7 +704,11 @@ fn normalize_socket_option(level: i32, optname: i32) -> (i32, i32) {
 }
 
 fn is_guest_timeout(level: i32, optname: i32) -> bool {
-    level == 1 && matches!(optname, GUEST_SO_RCVTIMEO | GUEST_SO_SNDTIMEO)
+    is_guest_socket_level(level) && matches!(optname, GUEST_SO_RCVTIMEO | GUEST_SO_SNDTIMEO)
+}
+
+fn is_guest_socket_level(level: i32) -> bool {
+    level == 1 || level == WASI_SOL_SOCKET
 }
 
 fn guest_timeout_to_windows(guest: &[u8]) -> Vec<u8> {

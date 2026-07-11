@@ -28,7 +28,7 @@ Download the latest release asset for your platform:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adamziel/wasmtime-mysql/main/scripts/install-release.sh | sh
-cd wasmtime-mysql-v0.1.5-*
+cd wasmtime-mysql-v0.1.6-*
 ```
 
 On macOS, the unsigned binary may need quarantine removed:
@@ -44,7 +44,7 @@ checksum, and prints the directory it extracted:
 
 ```powershell
 Invoke-RestMethod https://raw.githubusercontent.com/adamziel/wasmtime-mysql/main/scripts/install-release.ps1 | Invoke-Expression
-cd .\wasmtime-mysql-v0.1.5-windows-aarch64
+cd .\wasmtime-mysql-v0.1.6-windows-aarch64
 .\scripts\run-server.ps1 -Port 3307
 ```
 

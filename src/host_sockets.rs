@@ -26,6 +26,11 @@ const WASI_ALT_SOCK_DGRAM: i32 = 5;
 const WASI_ALT_SOCK_STREAM: i32 = 6;
 const WASI_ALT_SOCK_CLOEXEC: i32 = 0x2000;
 const WASI_ALT_SOCK_NONBLOCK: i32 = 0x4000;
+const WASI_SOL_SOCKET: i32 = 0x7fff_ffff;
+const WASI_F_GETFL: i32 = 3;
+const WASI_F_SETFL: i32 = 4;
+const WASI_O_NONBLOCK: i32 = 0x0004;
+const WASI_SO_ERROR: i32 = 4;
 
 #[derive(Clone)]
 pub(crate) struct HostSockets {
@@ -384,7 +389,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
                 cvt_i32(unsafe {
                     libc::setsockopt(
                         socket.raw_fd,
-                        level,
+                        normalize_socket_level(level),
                         optname,
                         optval.as_ptr().cast::<libc::c_void>(),
                         optval.len() as libc::socklen_t,
@@ -423,7 +428,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
                 let rc = unsafe {
                     libc::getsockopt(
                         socket.raw_fd,
-                        level,
+                        normalize_socket_level(level),
                         optname,
                         optval.as_mut_ptr().cast::<libc::c_void>(),
                         &mut optlen,
@@ -431,6 +436,11 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
                 };
                 if rc < 0 {
                     return neg_last_errno();
+                }
+                if is_guest_socket_level(level) && optname == WASI_SO_ERROR && optlen as usize >= 4
+                {
+                    let host_error = i32::from_ne_bytes(optval[..4].try_into().unwrap());
+                    optval[..4].copy_from_slice(&errno::from_host_errno(host_error).to_ne_bytes());
                 }
                 if let Err(errno) = write_guest(&mut caller, optval_ptr, &optval[..optlen as usize])
                 {
@@ -676,7 +686,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
                     Ok(socket) => socket,
                     Err(errno) => return neg_errno(errno),
                 };
-                cvt_i32(unsafe { libc::fcntl(socket.raw_fd, cmd, arg) })
+                socket_fcntl(socket.raw_fd, cmd, arg)
             }
             #[cfg(not(unix))]
             {
@@ -882,6 +892,50 @@ fn normalize_socket_domain(domain: i32) -> i32 {
     }
 }
 
+#[cfg(unix)]
+fn normalize_socket_level(level: i32) -> i32 {
+    if is_guest_socket_level(level) {
+        libc::SOL_SOCKET
+    } else {
+        level
+    }
+}
+
+#[cfg(unix)]
+fn is_guest_socket_level(level: i32) -> bool {
+    level == 1 || level == WASI_SOL_SOCKET
+}
+
+#[cfg(unix)]
+fn socket_fcntl(raw_fd: RawFd, cmd: i32, arg: i32) -> i32 {
+    match cmd {
+        WASI_F_GETFL => {
+            let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
+            if flags < 0 {
+                return neg_last_errno();
+            }
+            if flags & libc::O_NONBLOCK != 0 {
+                WASI_O_NONBLOCK
+            } else {
+                0
+            }
+        }
+        WASI_F_SETFL => {
+            let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
+            if flags < 0 {
+                return neg_last_errno();
+            }
+            let flags = if arg & WASI_O_NONBLOCK != 0 {
+                flags | libc::O_NONBLOCK
+            } else {
+                flags & !libc::O_NONBLOCK
+            };
+            cvt_i32(unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags) })
+        }
+        _ => neg_errno(errno::EINVAL),
+    }
+}
+
 #[cfg(any(target_os = "android", target_os = "linux"))]
 fn host_socket_flag_mask() -> i32 {
     libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK
@@ -1036,4 +1090,15 @@ fn last_errno() -> i32 {
 
 fn neg_errno(errno: i32) -> i32 {
     -errno
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn translates_wasi_sol_socket_to_the_host_value() {
+        assert_eq!(normalize_socket_level(WASI_SOL_SOCKET), libc::SOL_SOCKET);
+    }
 }
