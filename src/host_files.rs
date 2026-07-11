@@ -368,10 +368,10 @@ impl HostFiles {
 
 #[cfg(windows)]
 fn sync_directory(path: &Path) -> std::io::Result<()> {
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING,
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING,
     };
 
     let mut wide_path: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -379,7 +379,8 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
     let handle = unsafe {
         CreateFileW(
             wide_path.as_ptr(),
-            FILE_READ_ATTRIBUTES,
+            // FlushFileBuffers requires a handle with GENERIC_WRITE access.
+            GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
@@ -688,4 +689,26 @@ fn io_errno(err: std::io::Error) -> i32 {
 
 fn neg_errno(errno: i32) -> i32 {
     -errno
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn syncs_a_directory_handle() {
+        let path = std::env::temp_dir().join(format!(
+            "wasmtime-mysql-sync-directory-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        let result = sync_directory(&path);
+        std::fs::remove_dir(&path).unwrap();
+        result.unwrap();
+    }
 }

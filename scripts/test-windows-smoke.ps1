@@ -14,6 +14,45 @@ $serverError = Join-Path $runDirectory "server.err"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $runDirectory
 New-Item -ItemType Directory -Force -Path (Join-Path $runDirectory "tmp") | Out-Null
 
+function ConvertTo-CommandLine {
+    param([string[]]$Arguments)
+
+    $quoted = ($Arguments | ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }) -join " "
+    return $quoted
+}
+
+function Write-ProcessLog {
+    param([string]$Path)
+
+    if (Test-Path $Path) {
+        Get-Content $Path
+    }
+}
+
+function Invoke-RunnerAndWait {
+    param(
+        [string]$Name,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds
+    )
+
+    $stdout = Join-Path $runDirectory "$Name.out"
+    $stderr = Join-Path $runDirectory "$Name.err"
+    $process = Start-Process -FilePath $Runner -ArgumentList (ConvertTo-CommandLine -Arguments $Arguments) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        Stop-Process -Id $process.Id -Force
+        $process.WaitForExit()
+        Write-ProcessLog $stdout
+        Write-ProcessLog $stderr
+        throw "$Name did not exit within $TimeoutSeconds seconds"
+    }
+    if ($process.ExitCode -ne 0) {
+        Write-ProcessLog $stdout
+        Write-ProcessLog $stderr
+        throw "$Name failed with exit code $($process.ExitCode)"
+    }
+}
+
 $commonArgs = @(
     "--no-default-preopen",
     "--preopen", "$runDirectory=/tmp",
@@ -34,10 +73,7 @@ $initializeArgs = $commonArgs + @(
     "--caching-sha2-password-auto-generate-rsa-keys=OFF"
 )
 
-& $Runner @initializeArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "MySQL initialization failed with exit code $LASTEXITCODE"
-}
+Invoke-RunnerAndWait -Name "initialize" -Arguments $initializeArgs -TimeoutSeconds 120
 
 $serverArgs = $commonArgs + @(
     "--no-defaults",
@@ -52,8 +88,7 @@ $serverArgs = $commonArgs + @(
     "--sha256-password-auto-generate-rsa-keys=OFF",
     "--caching-sha2-password-auto-generate-rsa-keys=OFF"
 )
-$quotedArgs = ($serverArgs | ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }) -join " "
-$server = Start-Process -FilePath $Runner -ArgumentList $quotedArgs -PassThru -RedirectStandardOutput $serverLog -RedirectStandardError $serverError
+$server = Start-Process -FilePath $Runner -ArgumentList (ConvertTo-CommandLine -Arguments $serverArgs) -PassThru -RedirectStandardOutput $serverLog -RedirectStandardError $serverError
 
 try {
     $connected = $false
