@@ -1,0 +1,234 @@
+diff --git a/sql/conn_handler/connection_acceptor.h b/sql/conn_handler/connection_acceptor.h
+index 4012fb1c..55bdb77e 100644
+--- a/sql/conn_handler/connection_acceptor.h
++++ b/sql/conn_handler/connection_acceptor.h
+@@ -26,6 +26,10 @@
+ #ifndef CONNECTION_ACCEPTOR_INCLUDED
+ #define CONNECTION_ACCEPTOR_INCLUDED
+ 
++#if defined(__wasi__)
++#include "mysql_wasi_runtime_shim.h"
++#endif
++
+ #include "sql/conn_handler/channel_info.h"                // Channel_info
+ #include "sql/conn_handler/connection_handler_manager.h"  // Connection_handler_manager
+ 
+@@ -61,7 +65,11 @@ class Connection_acceptor {
+   void connection_event_loop() {
+     Connection_handler_manager *mgr =
+         Connection_handler_manager::get_instance();
+-    while (!connection_events_loop_aborted()) {
++    while (!connection_events_loop_aborted()
++#if defined(__wasi__)
++           && !waasmtime_mysql_shutdown_requested()
++#endif
++    ) {
+       Channel_info *channel_info = m_listener->listen_for_connection_event();
+       if (channel_info != nullptr) mgr->process_new_connection(channel_info);
+     }
+diff --git a/sql/conn_handler/socket_connection.cc b/sql/conn_handler/socket_connection.cc
+index c2429f8b..7eb6b786 100644
+--- a/sql/conn_handler/socket_connection.cc
++++ b/sql/conn_handler/socket_connection.cc
+@@ -89,8 +89,10 @@ extern "C" {
+ 
+ #if defined(__wasi__)
+ #define MYSQL_SOCKET_CONNECTION_POLL(...) waasmtime_mysql_poll(__VA_ARGS__)
++static constexpr int MYSQL_SOCKET_CONNECTION_POLL_TIMEOUT_MS{100};
+ #else
+ #define MYSQL_SOCKET_CONNECTION_POLL(...) poll(__VA_ARGS__)
++static constexpr int MYSQL_SOCKET_CONNECTION_POLL_TIMEOUT_MS{-1};
+ #endif
+ 
+ using std::max;
+@@ -1085,7 +1087,8 @@ static bool handle_admin_socket(
+ 
+   while (!connection_events_loop_aborted()) {
+ #ifdef HAVE_POLL
+-    const int retval = MYSQL_SOCKET_CONNECTION_POLL(fds, NUMBER_OF_POLLED_FDS, -1);
++    const int retval = MYSQL_SOCKET_CONNECTION_POLL(
++        fds, NUMBER_OF_POLLED_FDS, MYSQL_SOCKET_CONNECTION_POLL_TIMEOUT_MS);
+ #else
+     fd_set read_fds = client_fds;
+     const int retval =
+@@ -1105,6 +1108,8 @@ static bool handle_admin_socket(
+ 
+     if (retval < 0) return true;
+ 
++    if (retval == 0) continue;
++
+     if (connection_events_loop_aborted()) return false;
+ 
+ #ifdef HAVE_SETNS
+@@ -1355,7 +1360,8 @@ const Listen_socket *Mysqld_socket_listener::get_listen_socket() const {
+ Channel_info *Mysqld_socket_listener::listen_for_connection_event() {
+ #ifdef HAVE_POLL
+   int retval =
+-      MYSQL_SOCKET_CONNECTION_POLL(&m_poll_info.m_fds[0], m_socket_vector.size(), -1);
++      MYSQL_SOCKET_CONNECTION_POLL(&m_poll_info.m_fds[0], m_socket_vector.size(),
++                                   MYSQL_SOCKET_CONNECTION_POLL_TIMEOUT_MS);
+ #else
+   m_select_info.m_read_fds = m_select_info.m_client_fds;
+   int retval = select((int)m_select_info.m_max_used_connection,
+@@ -1375,6 +1381,8 @@ Channel_info *Mysqld_socket_listener::listen_for_connection_event() {
+ 
+   if (retval < 0 || connection_events_loop_aborted()) return nullptr;
+ 
++  if (retval == 0) return nullptr;
++
+   /* Is this a new connection request ? */
+   const Listen_socket *listen_socket = get_listen_socket();
+   /*
+diff --git a/sql/mysqld.cc b/sql/mysqld.cc
+index bcd0f22a..9ef1a587 100644
+--- a/sql/mysqld.cc
++++ b/sql/mysqld.cc
+@@ -2506,6 +2506,8 @@ void kill_mysql(void) {
+       CloseHandle(hEvent);
+     */
+   }
++#elif defined(__wasi__)
++  waasmtime_mysql_request_shutdown();
+ #else
+   if (pthread_kill(signal_thread_id.thread, SIGTERM)) {
+     DBUG_PRINT("error", ("Got error %d from pthread_kill",
+@@ -9946,6 +9948,9 @@ int mysqld_main(int argc, char **argv)
+ 
+   mysqld_socket_acceptor->check_and_spawn_admin_connection_handler_thread();
+   mysqld_socket_acceptor->connection_event_loop();
++#if defined(__wasi__)
++  close_connections();
++#endif
+ #endif /* _WIN32 */
+   server_operational_state = SERVER_SHUTTING_DOWN;
+   sysd::notify("STOPPING=1\nSTATUS=Server shutdown in progress\n");
+diff --git a/sql/rpl_gtid_persist.cc b/sql/rpl_gtid_persist.cc
+index 7b01cd74..86478897 100644
+--- a/sql/rpl_gtid_persist.cc
++++ b/sql/rpl_gtid_persist.cc
+@@ -835,6 +835,9 @@ static void *compress_gtid_table(void *p_thd) {
+   Create the compression thread to compress gtid_executed table.
+ */
+ void create_compress_gtid_table_thread() {
++#if defined(__wasi__)
++  return;
++#else
+   my_thread_attr_t attr;
+   int error = 0;
+   THD *thd;
+@@ -869,12 +872,16 @@ void create_compress_gtid_table_thread() {
+   }
+ 
+   (void)my_thread_attr_destroy(&attr);
++#endif
+ }
+ 
+ /**
+   Terminate the compression thread.
+ */
+ void terminate_compress_gtid_table_thread() {
++#if defined(__wasi__)
++  return;
++#else
+   DBUG_TRACE;
+   int error = 0;
+ 
+@@ -892,4 +899,5 @@ void terminate_compress_gtid_table_thread() {
+   if (error != 0)
+     LogErr(WARNING_LEVEL, ER_FAILED_TO_JOIN_GTID_TABLE_COMPRESSION_THREAD,
+            error);
++#endif
+ }
+diff --git a/storage/innobase/os/os0file.cc b/storage/innobase/os/os0file.cc
+index ecb52581..82ae4d35 100644
+--- a/storage/innobase/os/os0file.cc
++++ b/storage/innobase/os/os0file.cc
+@@ -332,6 +332,12 @@ __attribute__((import_module("waasmtime_mysql_files"), import_name("truncate")))
+ int32_t waasmtime_mysql_file_truncate(int32_t fd, int64_t size);
+ __attribute__((import_module("waasmtime_mysql_files"), import_name("sync")))
+ int32_t waasmtime_mysql_file_sync(int32_t fd, int32_t data_only);
++__attribute__((import_module("waasmtime_mysql_files"),
++               import_name("sync_parent")))
++int32_t waasmtime_mysql_file_sync_parent(const char *path);
++__attribute__((import_module("waasmtime_mysql_files"),
++               import_name("lock_exclusive")))
++int32_t waasmtime_mysql_file_lock_exclusive(int32_t fd);
+ }
+ 
+ static const char *os_wasi_resolve_path(const char *path, char *buffer,
+@@ -422,6 +428,19 @@ static int os_wasi_file_truncate(int fd, os_offset_t size) {
+ static int os_wasi_file_sync(int fd, bool data_only) {
+   return os_wasi_decode_i32(waasmtime_mysql_file_sync(fd, data_only ? 1 : 0));
+ }
++
++static int os_wasi_file_sync_parent(const char *path) {
++  char resolved[FN_REFLEN];
++  const char *host_path = os_wasi_resolve_path(path, resolved, sizeof(resolved));
++  if (host_path == nullptr) {
++    return -1;
++  }
++  return os_wasi_decode_i32(waasmtime_mysql_file_sync_parent(host_path));
++}
++
++static int os_wasi_file_lock(int fd) {
++  return os_wasi_decode_i32(waasmtime_mysql_file_lock_exclusive(fd));
++}
+ #else
+ static int os_wasi_file_open(const char *path, int flags, mode_t mode) {
+   return ::open(path, flags, mode);
+@@ -1594,26 +1613,30 @@ static bool os_aio_validate_skip() {
+ 
+ #undef USE_FILE_LOCK
+ #define USE_FILE_LOCK
+-#if defined(UNIV_HOTBACKUP) || defined(_WIN32) || defined(__wasi__)
++#if defined(UNIV_HOTBACKUP) || defined(_WIN32)
+ /* InnoDB Hot Backup does not lock the data files.
+  On Windows, mandatory locking is used.
+- WASI preview1 does not provide POSIX advisory file locks.
+  */
+ #undef USE_FILE_LOCK
+-#endif /* UNIV_HOTBACKUP || _WIN32 || __wasi__ */
++#endif /* UNIV_HOTBACKUP || _WIN32 */
+ #ifdef USE_FILE_LOCK
+ /** Obtain an exclusive lock on a file.
+ @param[in]      fd              file descriptor
+ @param[in]      name            file name
+ @return 0 on success */
+ static int os_file_lock(int fd, const char *name) {
++#if defined(__wasi__)
++  const int ret = os_wasi_file_lock(fd);
++#else
+   struct flock lk;
+ 
+   lk.l_type = F_WRLCK;
+   lk.l_whence = SEEK_SET;
+   lk.l_start = lk.l_len = 0;
+ 
+-  if (fcntl(fd, F_SETLK, &lk) == -1) {
++  const int ret = fcntl(fd, F_SETLK, &lk);
++#endif
++  if (ret == -1) {
+     ib::error(ER_IB_MSG_749)
+         << "Unable to lock " << name << " error: " << errno;
+ 
+@@ -3041,9 +3064,10 @@ static void os_parent_dir_fsync_posix(const char *path) {
+   ut_a(path[0] != '\0');
+ 
+ #if defined(__wasi__)
+-  /* WASI preview1 has no portable parent-directory fsync operation. */
++  const auto ret = os_wasi_file_sync_parent(path);
++  ut_a_eq(ret, 0);
+   return;
+-#endif
++#else
+ 
+   auto parent_in_path = os_file_get_parent_dir(path);
+   const char *parent_dir = parent_in_path;
+@@ -3073,6 +3097,7 @@ static void os_parent_dir_fsync_posix(const char *path) {
+   ut_a_eq(ret, 0);
+ 
+   ::close(dir_fd);
++#endif
+ }
+ 
+ /** Check the existence and type of the given file.

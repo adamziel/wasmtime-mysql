@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::thread;
 
 use clap::Parser;
 use wasmtime::error::Context as _;
 use wasmtime::{
-    Config, Engine, ExternType, Linker, Memory, Module, Result, SharedMemory, Store, bail,
+    Caller, Config, Engine, ExternType, Linker, Memory, Module, Result, SharedMemory, Store, bail,
 };
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
@@ -25,6 +25,7 @@ pub(crate) struct AppState {
     files: host_files::HostFiles,
     sockets: host_sockets::HostSockets,
     network_allowed: bool,
+    shutdown_requested: Arc<AtomicBool>,
 }
 
 struct RuntimeEnv {
@@ -33,6 +34,7 @@ struct RuntimeEnv {
     cli: Cli,
     files: host_files::HostFiles,
     sockets: host_sockets::HostSockets,
+    shutdown_requested: Arc<AtomicBool>,
     memories: Vec<ImportedSharedMemory>,
     next_thread_id: AtomicI32,
 }
@@ -164,17 +166,19 @@ fn run() -> Result<()> {
     let module = Module::from_binary(&engine, MYSQLD_WASM)
         .context("failed to compile embedded mysqld WebAssembly module")?;
 
-    let mut linker = build_base_linker(&engine)?;
-
     let wasi = build_wasi(&cli)?;
     let network_allowed = !cli.no_network;
     let files = host_files::HostFiles::new(&cli).context("failed to configure host file table")?;
     let sockets = host_sockets::HostSockets::new();
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    install_shutdown_signal_handlers(shutdown_requested.clone())?;
+    let mut linker = build_base_linker(&engine)?;
     let state = AppState {
         wasi,
         files: files.clone(),
         sockets: sockets.clone(),
         network_allowed,
+        shutdown_requested: shutdown_requested.clone(),
     };
     let mut store = Store::new(&engine, state);
     let memories = define_imported_memories(&engine, &module, &mut linker, &mut store)
@@ -185,6 +189,7 @@ fn run() -> Result<()> {
         cli: cli.clone(),
         files,
         sockets,
+        shutdown_requested,
         memories,
         next_thread_id: AtomicI32::new(1),
     });
@@ -212,7 +217,48 @@ fn build_base_linker(engine: &Engine) -> Result<Linker<AppState>> {
         .context("failed to link WASIp1 imports")?;
     host_files::add_to_linker(&mut linker).context("failed to link host file imports")?;
     host_sockets::add_to_linker(&mut linker).context("failed to link host socket imports")?;
+    linker.func_wrap(
+        "wasmtime_mysql_runtime",
+        "request_shutdown",
+        |caller: Caller<'_, AppState>| {
+            caller
+                .data()
+                .shutdown_requested
+                .store(true, Ordering::Release);
+        },
+    )?;
+    linker.func_wrap(
+        "wasmtime_mysql_runtime",
+        "shutdown_requested",
+        |caller: Caller<'_, AppState>| -> i32 {
+            i32::from(caller.data().shutdown_requested.load(Ordering::Acquire))
+        },
+    )?;
     Ok(linker)
+}
+
+fn install_shutdown_signal_handlers(shutdown_requested: Arc<AtomicBool>) -> Result<()> {
+    #[cfg(unix)]
+    {
+        signal_hook::flag::register_conditional_shutdown(
+            signal_hook::consts::signal::SIGINT,
+            1,
+            shutdown_requested.clone(),
+        )
+        .context("failed to register second Ctrl+C shutdown handler")?;
+        signal_hook::flag::register(
+            signal_hook::consts::signal::SIGINT,
+            shutdown_requested.clone(),
+        )
+        .context("failed to register Ctrl+C shutdown handler")?;
+        signal_hook::flag::register(signal_hook::consts::signal::SIGTERM, shutdown_requested)
+            .context("failed to register SIGTERM shutdown handler")?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = shutdown_requested;
+
+    Ok(())
 }
 
 fn build_wasi(cli: &Cli) -> Result<WasiP1Ctx> {
@@ -344,6 +390,7 @@ fn run_wasi_thread(runtime: Arc<RuntimeEnv>, thread_id: i32, start_arg: i32) -> 
         files: runtime.files.clone(),
         sockets: runtime.sockets.clone(),
         network_allowed: !runtime.cli.no_network,
+        shutdown_requested: runtime.shutdown_requested.clone(),
     };
     let mut store = Store::new(&runtime.engine, state);
     define_shared_memories(&mut linker, &mut store, &runtime.memories)

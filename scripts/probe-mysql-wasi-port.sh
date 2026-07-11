@@ -12,6 +12,7 @@ openssl_prefix="${OPENSSL_WASI_PREFIX:-$root/build/openssl-wasi/install}"
 image="${WASI_SDK_IMAGE:-ghcr.io/webassembly/wasi-sdk:wasi-sdk-33}"
 bison_image="${BISON_IMAGE:-debian:bookworm-slim}"
 patch_file="$root/patches/mysql-wasi/0001-add-wasi-port-probe-cmake-bypasses.patch"
+lifecycle_patch_file="$root/patches/mysql-wasi/0002-wasi-graceful-shutdown.patch"
 log_file="${MYSQL_WASI_PORT_PROBE_LOG:-$build_dir/probe.log}"
 target="${MYSQL_WASI_PORT_TARGET:-mysqld}"
 
@@ -37,6 +38,8 @@ cp "$root/patches/mysql-wasi/files/include/mysql_wasi_socket_shim.h" \
   "$src_dir/include/mysql_wasi_socket_shim.h"
 cp "$root/patches/mysql-wasi/files/include/mysql_wasi_libc_shim.h" \
   "$src_dir/include/mysql_wasi_libc_shim.h"
+cp "$root/patches/mysql-wasi/files/include/mysql_wasi_runtime_shim.h" \
+  "$src_dir/include/mysql_wasi_runtime_shim.h"
 cp "$root/patches/mysql-wasi/files/include/syslog.h" \
   "$src_dir/include/syslog.h"
 mkdir -p "$src_dir/include/sys"
@@ -51,6 +54,7 @@ cp "$root/patches/mysql-wasi/files/include/pwd.h" \
 cp "$root/patches/mysql-wasi/files/vio/mysql_wasi_socket_shim.c" \
   "$src_dir/vio/mysql_wasi_socket_shim.c"
 git apply --directory="${src_dir#$root/}" "$patch_file"
+git apply --directory="${src_dir#$root/}" "$lifecycle_patch_file"
 : > "$log_file"
 
 if ! docker run --rm \

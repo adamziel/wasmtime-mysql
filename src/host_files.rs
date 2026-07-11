@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 
 use wasmtime::{Caller, Linker, Result};
 
@@ -205,6 +207,53 @@ impl HostFiles {
         }
     }
 
+    fn sync_parent(&self, guest_path: &str) -> i32 {
+        #[cfg(unix)]
+        {
+            let parent = match self.resolve_parent(guest_path) {
+                Ok(path) => path,
+                Err(errno) => return neg_errno(errno),
+            };
+            match File::open(parent).and_then(|directory| directory.sync_all()) {
+                Ok(()) => 0,
+                Err(err) => neg_errno(io_errno(err)),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = guest_path;
+            neg_errno(libc::ENOSYS)
+        }
+    }
+
+    fn lock_exclusive(&self, fd: i32) -> i32 {
+        #[cfg(unix)]
+        {
+            let inner = self.inner.lock().unwrap();
+            let Some(file) = inner.files.get(&fd) else {
+                return neg_errno(libc::EBADF);
+            };
+            let mut lock = libc::flock {
+                l_type: libc::F_WRLCK as _,
+                l_whence: libc::SEEK_SET as _,
+                l_start: 0,
+                l_len: 0,
+                l_pid: 0,
+            };
+            let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &mut lock) };
+            if rc == 0 {
+                0
+            } else {
+                neg_errno(io_errno(std::io::Error::last_os_error()))
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            neg_errno(libc::ENOSYS)
+        }
+    }
+
     fn resolve(&self, guest_path: &str) -> std::result::Result<PathBuf, i32> {
         let normalized = normalize_guest_path(guest_path)?;
         let inner = self.inner.lock().unwrap();
@@ -229,6 +278,21 @@ impl HostFiles {
         }
 
         Err(WASI_ENOTCAPABLE)
+    }
+
+    fn resolve_parent(&self, guest_path: &str) -> std::result::Result<PathBuf, i32> {
+        let path = self.resolve(guest_path)?;
+        let parent = path.parent().ok_or(libc::EINVAL)?;
+        let inner = self.inner.lock().unwrap();
+        if inner
+            .preopens
+            .iter()
+            .any(|preopen| parent.starts_with(&preopen.host))
+        {
+            Ok(parent.to_path_buf())
+        } else {
+            Err(WASI_ENOTCAPABLE)
+        }
     }
 }
 
@@ -309,6 +373,24 @@ pub(crate) fn add_to_linker(linker: &mut Linker<AppState>) -> Result<()> {
         |caller: Caller<'_, AppState>, fd: i32, data_only: i32| -> i32 {
             caller.data().files.sync(fd, data_only != 0)
         },
+    )?;
+
+    linker.func_wrap(
+        MODULE_NAME,
+        "sync_parent",
+        |mut caller: Caller<'_, AppState>, path_ptr: i32| -> i32 {
+            let path = match read_cstr(&mut caller, path_ptr) {
+                Ok(path) => path,
+                Err(errno) => return neg_errno(errno),
+            };
+            caller.data().files.sync_parent(&path)
+        },
+    )?;
+
+    linker.func_wrap(
+        MODULE_NAME,
+        "lock_exclusive",
+        |caller: Caller<'_, AppState>, fd: i32| -> i32 { caller.data().files.lock_exclusive(fd) },
     )?;
 
     Ok(())
