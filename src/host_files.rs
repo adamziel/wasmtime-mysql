@@ -15,8 +15,6 @@ use std::os::unix::io::AsRawFd;
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
 
 use wasmtime::{Caller, Linker, Result};
 
@@ -46,13 +44,27 @@ struct HostFilesInner {
     #[cfg(windows)]
     lock_paths: HashMap<i32, PathBuf>,
     #[cfg(windows)]
-    locks: HashMap<PathBuf, File>,
+    locks: HashMap<PathBuf, WindowsFileLock>,
     preopens: Vec<PreopenMapping>,
 }
 
 struct PreopenMapping {
     guest: String,
     host: PathBuf,
+}
+
+#[cfg(windows)]
+struct WindowsFileLock {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for WindowsFileLock {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
 }
 
 impl HostFiles {
@@ -305,10 +317,10 @@ impl HostFiles {
         }
         #[cfg(windows)]
         {
-            use windows_sys::Win32::Storage::FileSystem::{
-                LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+            use windows_sys::Win32::Foundation::{
+                CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, INVALID_HANDLE_VALUE,
             };
-            use windows_sys::Win32::System::IO::OVERLAPPED;
+            use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READWRITE};
 
             let mut inner = self.inner.lock().unwrap();
             let Some(lock_path) = inner.lock_paths.get(&fd).cloned() else {
@@ -317,32 +329,34 @@ impl HostFiles {
             if inner.locks.contains_key(&lock_path) {
                 return 0;
             }
-            let Some(file) = inner.files.get(&fd) else {
+            if !inner.files.contains_key(&fd) {
                 return neg_errno(errno::EBADF);
-            };
-            // Windows locks belong to a handle, while fcntl locks are process-wide.
-            // Keep one duplicate handle per file so later opens in this guest process
-            // observe the existing lock instead of conflicting with it.
-            let lock_file = match file.try_clone() {
-                Ok(file) => file,
-                Err(err) => return neg_errno(io_errno(err)),
-            };
-            let mut overlapped = OVERLAPPED::default();
-            let locked = unsafe {
-                LockFileEx(
-                    lock_file.as_raw_handle(),
-                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            }
+
+            // LockFileEx is mandatory: it blocks the server's other handles from
+            // writing the same file. A named kernel object gives this guest process
+            // the advisory, process-wide fcntl behavior InnoDB expects instead.
+            let name = windows_lock_name(&lock_path);
+            let handle = unsafe {
+                CreateFileMappingW(
+                    INVALID_HANDLE_VALUE,
+                    std::ptr::null(),
+                    PAGE_READWRITE,
                     0,
-                    u32::MAX,
-                    u32::MAX,
-                    &mut overlapped,
+                    1,
+                    name.as_ptr(),
                 )
             };
-            if locked != 0 {
-                inner.locks.insert(lock_path, lock_file);
-                0
-            } else {
+            if handle == std::ptr::null_mut() {
                 neg_errno(io_errno(std::io::Error::last_os_error()))
+            } else if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                unsafe {
+                    CloseHandle(handle);
+                }
+                neg_errno(errno::EAGAIN)
+            } else {
+                inner.locks.insert(lock_path, WindowsFileLock { handle });
+                0
             }
         }
         #[cfg(not(any(unix, windows)))]
@@ -572,6 +586,25 @@ fn join_suffix(root: &PathBuf, suffix: &str) -> PathBuf {
         }
     }
     path
+}
+
+#[cfg(windows)]
+fn windows_lock_name(path: &Path) -> Vec<u16> {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for code_unit in path
+        .as_os_str()
+        .to_string_lossy()
+        .to_uppercase()
+        .encode_utf16()
+    {
+        hash ^= u64::from(code_unit);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut name: Vec<u16> = format!("Local\\wasmtime-mysql-file-{hash:016x}")
+        .encode_utf16()
+        .collect();
+    name.push(0);
+    name
 }
 
 fn read_cstr(caller: &mut Caller<'_, AppState>, ptr: i32) -> std::result::Result<String, i32> {

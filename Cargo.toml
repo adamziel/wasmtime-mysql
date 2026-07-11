@@ -1,6 +1,6 @@
 [package]
 name = "wasmtime-mysql"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 build = "build.rs"
 
@@ -17,7 +17,7 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_Networking_WinSock",
   "Win32_Security",
   "Win32_Storage_FileSystem",
-  "Win32_System_IO",
+  "Win32_System_Memory",
 ] }
 
 [build-dependencies]
