@@ -55,14 +55,14 @@ struct PreopenMapping {
 
 #[cfg(windows)]
 struct WindowsFileLock {
-    handle: windows_sys::Win32::Foundation::HANDLE,
+    handle: usize,
 }
 
 #[cfg(windows)]
 impl Drop for WindowsFileLock {
     fn drop(&mut self) {
         unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+            windows_sys::Win32::Foundation::CloseHandle(self.handle as _);
         }
     }
 }
@@ -355,7 +355,12 @@ impl HostFiles {
                 }
                 neg_errno(errno::EAGAIN)
             } else {
-                inner.locks.insert(lock_path, WindowsFileLock { handle });
+                inner.locks.insert(
+                    lock_path,
+                    WindowsFileLock {
+                        handle: handle as usize,
+                    },
+                );
                 0
             }
         }
