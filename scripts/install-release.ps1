@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = if ($env:VERSION) { $env:VERSION } else { "v0.1.7" }
+    $Version = if ($env:VERSION) { $env:VERSION } else { "v0.1.8" }
 }
 
 $asset = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) {

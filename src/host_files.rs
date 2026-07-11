@@ -43,6 +43,10 @@ pub(crate) struct HostFiles {
 struct HostFilesInner {
     next_fd: i32,
     files: HashMap<i32, File>,
+    #[cfg(windows)]
+    lock_paths: HashMap<i32, PathBuf>,
+    #[cfg(windows)]
+    locks: HashMap<PathBuf, File>,
     preopens: Vec<PreopenMapping>,
 }
 
@@ -75,6 +79,10 @@ impl HostFiles {
             inner: Arc::new(Mutex::new(HostFilesInner {
                 next_fd: GUEST_FD_BASE,
                 files: HashMap::new(),
+                #[cfg(windows)]
+                lock_paths: HashMap::new(),
+                #[cfg(windows)]
+                locks: HashMap::new(),
                 preopens,
             })),
         })
@@ -108,21 +116,27 @@ impl HostFiles {
             options.truncate(true);
         }
 
-        let file = match options.open(host_path) {
+        let file = match options.open(&host_path) {
             Ok(file) => file,
             Err(err) => return neg_errno(io_errno(err)),
         };
+        #[cfg(windows)]
+        let lock_path = std::fs::canonicalize(&host_path).unwrap_or(host_path);
 
         let mut inner = self.inner.lock().unwrap();
         let fd = inner.next_fd;
         inner.next_fd = inner.next_fd.saturating_add(1);
         inner.files.insert(fd, file);
+        #[cfg(windows)]
+        inner.lock_paths.insert(fd, lock_path);
         fd
     }
 
     fn close(&self, fd: i32) -> i32 {
         let mut inner = self.inner.lock().unwrap();
         if inner.files.remove(&fd).is_some() {
+            #[cfg(windows)]
+            inner.lock_paths.remove(&fd);
             0
         } else {
             neg_errno(errno::EBADF)
@@ -296,14 +310,27 @@ impl HostFiles {
             };
             use windows_sys::Win32::System::IO::OVERLAPPED;
 
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
+            let Some(lock_path) = inner.lock_paths.get(&fd).cloned() else {
+                return neg_errno(errno::EBADF);
+            };
+            if inner.locks.contains_key(&lock_path) {
+                return 0;
+            }
             let Some(file) = inner.files.get(&fd) else {
                 return neg_errno(errno::EBADF);
+            };
+            // Windows locks belong to a handle, while fcntl locks are process-wide.
+            // Keep one duplicate handle per file so later opens in this guest process
+            // observe the existing lock instead of conflicting with it.
+            let lock_file = match file.try_clone() {
+                Ok(file) => file,
+                Err(err) => return neg_errno(io_errno(err)),
             };
             let mut overlapped = OVERLAPPED::default();
             let locked = unsafe {
                 LockFileEx(
-                    file.as_raw_handle(),
+                    lock_file.as_raw_handle(),
                     LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
                     0,
                     u32::MAX,
@@ -312,6 +339,7 @@ impl HostFiles {
                 )
             };
             if locked != 0 {
+                inner.locks.insert(lock_path, lock_file);
                 0
             } else {
                 neg_errno(io_errno(std::io::Error::last_os_error()))
@@ -710,5 +738,46 @@ mod tests {
         let result = sync_directory(&path);
         std::fs::remove_dir(&path).unwrap();
         result.unwrap();
+    }
+
+    #[test]
+    fn treats_locks_from_multiple_guest_handles_as_process_wide() {
+        let path = std::env::temp_dir().join(format!(
+            "wasmtime-mysql-lock-file-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let lock_path = std::fs::canonicalize(&path).unwrap();
+        let files = HostFiles {
+            inner: Arc::new(Mutex::new(HostFilesInner {
+                next_fd: GUEST_FD_BASE + 2,
+                files: HashMap::from([(GUEST_FD_BASE, first), (GUEST_FD_BASE + 1, second)]),
+                lock_paths: HashMap::from([
+                    (GUEST_FD_BASE, lock_path.clone()),
+                    (GUEST_FD_BASE + 1, lock_path),
+                ]),
+                locks: HashMap::new(),
+                preopens: Vec::new(),
+            })),
+        };
+
+        assert_eq!(files.lock_exclusive(GUEST_FD_BASE), 0);
+        assert_eq!(files.lock_exclusive(GUEST_FD_BASE + 1), 0);
+        drop(files);
+        std::fs::remove_file(&path).unwrap();
     }
 }
